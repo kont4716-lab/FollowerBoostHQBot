@@ -73,7 +73,7 @@ home_page = """
 <div class="time">{{ p["time"] }}</div>
 <p>❤️ {{ p.get("likes", 0) }} | تعليقات: {{ len(p.get("comments", [])) }}</p>
 <form method="post" action="/like/{{ loop.index0 }}" style="display:inline;">
-<button type="submit" style="width:auto;background:#e91e63;">إعجاب</button>
+<button type="submit" style="width:auto; background:#e91e63;">إعجاب</button>
 </form>
 <form method="post" action="/comment/{{ loop.index0 }}">
 <input name="comment" placeholder="اكتب تعليق..." required style="width:70%;">
@@ -96,7 +96,6 @@ def login():
                 if u.get("name") == username and u.get("password") == password:
                     session["user"] = username
                     return redirect(url_for("home"))
-            # Create if not exists (for simplicity)
             users.append({"name": username, "password": password or "", "created": str(datetime.now())})
             save_data(USERS_FILE, users)
             session["user"] = username
@@ -105,7 +104,7 @@ def login():
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    return login()  # Reuse login for simplicity
+    return login()
 
 @app.route("/home")
 def home():
@@ -157,6 +156,12 @@ def add_comment(post_id):
             })
             save_data(POSTS_FILE, posts)
     return redirect(url_for("home"))
+
+@app.route("/profile")
+def profile():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    return f"<h1>ملف {session['user']}</h1><p>عدد المتابعين: 0 (قريبًا)</p><a href='/home'>العودة</a>"
 
 @app.route("/logout")
 def logout():
