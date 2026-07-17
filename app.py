@@ -52,7 +52,7 @@ login_page = """
 <input name="password" type="password" placeholder="كلمة المرور" required>
 <button type="submit">دخول</button>
 </form>
-<a href="/register">تسجيل حساب جديد</a>
+<a href="/register">تسجيل</a>
 </div></body></html>
 """
 
@@ -71,17 +71,10 @@ home_page = """
 <div class="name">{{ p["user"] }}</div>
 <p>{{ p["content"] }}</p>
 <div class="time">{{ p["time"] }}</div>
-<p>❤️ {{ p.get("likes", 0) }} | تعليقات: {{ len(p.get("comments", [])) }}</p>
-<form method="post" action="/like/{{ loop.index0 }}" style="display:inline;">
-<button type="submit" style="width:auto; background:#e91e63;">إعجاب</button>
-</form>
-<form method="post" action="/comment/{{ loop.index0 }}">
-<input name="comment" placeholder="اكتب تعليق..." required style="width:70%;">
-<button type="submit" style="width:auto;">تعليق</button>
-</form>
+<p>❤️ {{ p.get("likes", 0) }} تعليقات: {{ len(p.get("comments", [])) }}</p>
 </div>
 {% endfor %}
-<a href="/profile">ملفي</a> | <a href="/logout">خروج</a>
+<a href="/logout">خروج</a>
 </div></body></html>
 """
 
@@ -130,38 +123,6 @@ def create_post():
         })
         save_data(POSTS_FILE, posts)
     return redirect(url_for("home"))
-
-@app.route("/like/<int:post_id>", methods=["POST"])
-def like_post(post_id):
-    if "user" not in session:
-        return redirect(url_for("login"))
-    posts = get_posts()
-    if 0 <= post_id < len(posts):
-        posts[post_id]["likes"] = posts[post_id].get("likes", 0) + 1
-        save_data(POSTS_FILE, posts)
-    return redirect(url_for("home"))
-
-@app.route("/comment/<int:post_id>", methods=["POST"])
-def add_comment(post_id):
-    if "user" not in session:
-        return redirect(url_for("login"))
-    text = request.form.get("comment")
-    if text:
-        posts = get_posts()
-        if 0 <= post_id < len(posts):
-            posts[post_id].setdefault("comments", []).append({
-                "user": session["user"],
-                "text": text,
-                "time": str(datetime.now())
-            })
-            save_data(POSTS_FILE, posts)
-    return redirect(url_for("home"))
-
-@app.route("/profile")
-def profile():
-    if "user" not in session:
-        return redirect(url_for("login"))
-    return f"<h1>ملف {session['user']}</h1><p>عدد المتابعين: 0 (قريبًا)</p><a href='/home'>العودة</a>"
 
 @app.route("/logout")
 def logout():
