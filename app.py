@@ -151,7 +151,7 @@ home_page = """
 
 <div class="container">
 
-<h1>المنشورات</h1>
+<h1>المنشورات - مرحبا {{ current_user }}</h1>
 
 <form method="post" action="/post">
 
@@ -167,21 +167,24 @@ home_page = """
 
 <div class="post">
 
-<div class="name">
-{{p["user"]}}
+<div class="name">{{ p["user"] }}</div>
+<p>{{ p["content"] }}</p>
+<div class="time">{{ p["time"] }}</div>
+<p>❤️ {{ p.get("likes", 0) }} | تعليقات: {{ len(p.get("comments", [])) }}</p>
+
+<form method="post" action="/like/{{ loop.index0 }}" style="display:inline;">
+<button type="submit" style="width:auto; background:#e91e63;">إعجاب</button>
+</form>
+
+<form method="post" action="/comment/{{ loop.index0 }}">
+<input name="comment" placeholder="اكتب تعليق..." required style="width:70%;">
+<button type="submit" style="width:auto;">تعليق</button>
+</form>
+
 </div>
-
-<p>
-{{p["content"]}}
-</p>
-
-<div class="time">
-{{p["time"]}}
-</div>
-
-</div>
-
 {% endfor %}
+
+<a href="/profile">ملفي الشخصي</a> | <a href="/logout">تسجيل خروج</a>
 
 </div>
 
@@ -203,7 +206,6 @@ def login():
                     return redirect(url_for("home"))
             return "اسم المستخدم أو كلمة المرور غير صحيحة"
         else:
-            # fallback
             username = request.form.get("username")
             if username:
                 users = get_users()
@@ -258,7 +260,7 @@ def home():
 
     posts = get_posts()
     posts.reverse()
-    return render_template_string(home_page, posts=posts)
+    return render_template_string(home_page, posts=posts, current_user=session["user"])
 
 
 @app.route("/post", methods=["POST"])
@@ -272,10 +274,49 @@ def create_post():
         posts.append({
             "user": session["user"],
             "content": content,
-            "time": str(datetime.now())
+            "time": str(datetime.now()),
+            "likes": 0,
+            "comments": []
         })
         save_data(POSTS_FILE, posts)
     return redirect(url_for("home"))
+
+
+@app.route("/like/<int:post_id>", methods=["POST"])
+def like_post(post_id):
+    if "user" not in session:
+        return redirect(url_for("login"))
+    posts = get_posts()
+    if 0 <= post_id < len(posts):
+        posts[post_id]["likes"] = posts[post_id].get("likes", 0) + 1
+        save_data(POSTS_FILE, posts)
+    return redirect(url_for("home"))
+
+
+@app.route("/comment/<int:post_id>", methods=["POST"])
+def add_comment(post_id):
+    if "user" not in session:
+        return redirect(url_for("login"))
+    comment_text = request.form.get("comment")
+    if comment_text:
+        posts = get_posts()
+        if 0 <= post_id < len(posts):
+            if "comments" not in posts[post_id]:
+                posts[post_id]["comments"] = []
+            posts[post_id]["comments"].append({
+                "user": session["user"],
+                "text": comment_text,
+                "time": str(datetime.now())
+            })
+            save_data(POSTS_FILE, posts)
+    return redirect(url_for("home"))
+
+
+@app.route("/profile")
+def profile():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    return f"<h1>ملف {session['user']}</h1><p>ميزة المتابعة قادمة قريبًا...</p><a href='/home'>العودة</a>"
 
 
 @app.route("/logout")
@@ -289,4 +330,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=5000
     )
-    
