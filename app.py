@@ -60,7 +60,7 @@ home_page = """
 <!DOCTYPE html>
 <html><head><title>Posts</title>""" + style + """</head><body>
 <div class="container">
-<h1>المنشورات</h1>
+<h1>المنشورات - مرحبا {{ current_user }}</h1>
 <form method="post" action="/post">
 <textarea name="content" placeholder="اكتب منشورك" required></textarea>
 <button>نشر</button>
@@ -71,6 +71,15 @@ home_page = """
 <div class="name">{{ p.get("user", "Unknown") }}</div>
 <p>{{ p.get("content", "") }}</p>
 <div class="time">{{ p.get("time", "") }}</div>
+<p>❤️ {{ p.get("likes", 0) }} | تعليقات: {{ len(p.get("comments", [])) }}</p>
+
+<form method="post" action="/like/{{ loop.index0 }}" style="display:inline;">
+<button type="submit" style="width:auto; background:#e91e63;">إعجاب</button>
+</form>
+<form method="post" action="/comment/{{ loop.index0 }}">
+<input name="comment" placeholder="اكتب تعليق..." required style="width:70%;">
+<button type="submit" style="width:auto;">تعليق</button>
+</form>
 </div>
 {% endfor %}
 <a href="/logout">تسجيل خروج</a>
@@ -104,7 +113,7 @@ def home():
         return redirect(url_for("login"))
     posts = get_posts()
     posts.reverse()
-    return render_template_string(home_page, posts=posts)
+    return render_template_string(home_page, posts=posts, current_user=session.get("user", ""))
 
 @app.route("/post", methods=["POST"])
 def create_post():
@@ -116,9 +125,37 @@ def create_post():
         posts.append({
             "user": session["user"],
             "content": content,
-            "time": str(datetime.now())
+            "time": str(datetime.now()),
+            "likes": 0,
+            "comments": []
         })
         save_data(POSTS_FILE, posts)
+    return redirect(url_for("home"))
+
+@app.route("/like/<int:post_id>", methods=["POST"])
+def like_post(post_id):
+    if "user" not in session:
+        return redirect(url_for("login"))
+    posts = get_posts()
+    if 0 <= post_id < len(posts):
+        posts[post_id]["likes"] = posts[post_id].get("likes", 0) + 1
+        save_data(POSTS_FILE, posts)
+    return redirect(url_for("home"))
+
+@app.route("/comment/<int:post_id>", methods=["POST"])
+def add_comment(post_id):
+    if "user" not in session:
+        return redirect(url_for("login"))
+    text = request.form.get("comment")
+    if text:
+        posts = get_posts()
+        if 0 <= post_id < len(posts):
+            posts[post_id].setdefault("comments", []).append({
+                "user": session["user"],
+                "text": text,
+                "time": str(datetime.now())
+            })
+            save_data(POSTS_FILE, posts)
     return redirect(url_for("home"))
 
 @app.route("/logout")
