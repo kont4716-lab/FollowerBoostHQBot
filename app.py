@@ -121,3 +121,27 @@ def create_post():
         posts.append({
             "user": session["user"],
             "content": content,
+            "time": str(datetime.now()),
+            "likes": 0
+        })
+        save_data(POSTS_FILE, posts)
+    return redirect(url_for("home"))
+
+@app.route("/like", methods=["POST"])
+def like_post():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    post_id = int(request.form.get("post_id", -1))
+    posts = get_posts()
+    if 0 <= post_id < len(posts):
+        posts[post_id]["likes"] = posts[post_id].get("likes", 0) + 1
+        save_data(POSTS_FILE, posts)
+    return redirect(url_for("home"))
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
