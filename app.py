@@ -71,16 +71,7 @@ home_page = """
 <div class="name">{{ p.get("user", "") }}</div>
 <p>{{ p.get("content", "") }}</p>
 <div class="time">{{ p.get("time", "") }}</div>
-<p>❤️ {{ p.get("likes", 0) }} | تعليقات: {{ len(p.get("comments", [])) }}</p>
-<form method="post" action="/like" style="display:inline;">
-<input type="hidden" name="post_id" value="{{ loop.index0 }}">
-<button type="submit" style="width:auto;background:#e91e63;">إعجاب</button>
-</form>
-<form method="post" action="/comment">
-<input type="hidden" name="post_id" value="{{ loop.index0 }}">
-<input name="comment" placeholder="اكتب تعليق..." required style="width:60%;">
-<button type="submit" style="width:auto;">تعليق</button>
-</form>
+<p>❤️ {{ p.get("likes", 0) }}</p>
 </div>
 {% endfor %}
 <a href="/logout">تسجيل خروج</a>
@@ -127,35 +118,7 @@ def create_post():
             "user": session["user"],
             "content": content,
             "time": str(datetime.now()),
-            "likes": 0,
-            "comments": []
-        })
-        save_data(POSTS_FILE, posts)
-    return redirect(url_for("home"))
-
-@app.route("/like", methods=["POST"])
-def like_post():
-    if "user" not in session:
-        return redirect(url_for("login"))
-    post_id = int(request.form.get("post_id", -1))
-    posts = get_posts()
-    if 0 <= post_id < len(posts):
-        posts[post_id]["likes"] = posts[post_id].get("likes", 0) + 1
-        save_data(POSTS_FILE, posts)
-    return redirect(url_for("home"))
-
-@app.route("/comment", methods=["POST"])
-def add_comment():
-    if "user" not in session:
-        return redirect(url_for("login"))
-    post_id = int(request.form.get("post_id", -1))
-    text = request.form.get("comment")
-    if text and 0 <= post_id < len(get_posts()):
-        posts = get_posts()
-        posts[post_id].setdefault("comments", []).append({
-            "user": session["user"],
-            "text": text,
-            "time": str(datetime.now())
+            "likes": 0
         })
         save_data(POSTS_FILE, posts)
     return redirect(url_for("home"))
@@ -167,3 +130,4 @@ def logout():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+    
