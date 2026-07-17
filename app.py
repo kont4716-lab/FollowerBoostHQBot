@@ -1,142 +1,273 @@
-from flask import Flask, request, redirect, url_for, send_from_directory, render_template_string
+from flask import Flask, request, redirect, url_for, session, render_template_string
 import os
-import uuid
+import json
+from datetime import datetime
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "uploads"
-ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm"}
+app.secret_key = "change_this_secret_key"
 
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+USERS_FILE = "users.json"
+POSTS_FILE = "posts.json"
 
 
-def get_videos():
-    if not os.path.exists(UPLOAD_FOLDER):
+def load_data(file):
+    if not os.path.exists(file):
         return []
-    videos = []
-    for f in os.listdir(UPLOAD_FOLDER):
-        if f == ".gitkeep" or f.startswith('.'):
-            continue
-        if allowed_file(f):
-            videos.append(f)
-    return sorted(videos, reverse=True)
+    try:
+        with open(file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return []
 
 
-HTML = """
+def save_data(file, data):
+    with open(file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+
+def get_users():
+    return load_data(USERS_FILE)
+
+
+def get_posts():
+    return load_data(POSTS_FILE)
+
+
+style = """
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background:#f2f2f2;
+    margin:0;
+    padding:0;
+}
+
+.container {
+    width:90%;
+    max-width:600px;
+    margin:40px auto;
+    background:white;
+    padding:20px;
+    border-radius:15px;
+    box-shadow:0 0 10px #ccc;
+}
+
+h1 {
+    text-align:center;
+}
+
+input, textarea {
+    width:100%;
+    padding:12px;
+    margin:8px 0;
+    border:1px solid #ccc;
+    border-radius:8px;
+    box-sizing:border-box;
+}
+
+button {
+    width:100%;
+    padding:12px;
+    background:#1976d2;
+    color:white;
+    border:none;
+    border-radius:8px;
+    cursor:pointer;
+}
+
+button:hover {
+    background:#125aa0;
+}
+
+.post {
+    background:#fafafa;
+    padding:15px;
+    margin:15px 0;
+    border-radius:10px;
+    border:1px solid #ddd;
+}
+
+.name {
+    font-weight:bold;
+    color:#1976d2;
+}
+
+.time {
+    font-size:12px;
+    color:#777;
+}
+</style>
+"""
+
+
+login_page = """
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mini TikTok</title>
-    <style>
-        body {
-            margin: 0;
-            background: #000;
-            font-family: Arial, sans-serif;
-            overflow-y: scroll;
-            scroll-snap-type: y mandatory;
-            height: 100vh;
-        }
-        .video {
-            height: 100vh;
-            scroll-snap-align: start;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            background: black;
-        }
-        video {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-        .upload {
-            position: fixed;
-            top: 15px;
-            left: 15px;
-            z-index: 999;
-            background: rgba(255,255,255,0.95);
-            padding: 12px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-        }
-        .info {
-            position: fixed;
-            bottom: 15px;
-            left: 15px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 8px 12px;
-            border-radius: 8px;
-            font-size: 14px;
-            z-index: 999;
-        }
-    </style>
+<title>Login</title>
+""" + style + """
 </head>
+
 <body>
 
-    <div class="upload">
-        <form action="/upload" method="post" enctype="multipart/form-data">
-            <input type="file" name="video" accept="video/*">
-            <button type="submit">رفع الفيديو</button>
-        </form>
-    </div>
+<div class="container">
 
-    <div class="info">
-        عدد الفيديوهات: {{ videos|length }}
-    </div>
+<h1>الدخول</h1>
 
-    {% for video in videos %}
-    <div class="video">
-        <video controls autoplay muted loop playsinline>
-            <source src="/uploads/{{ video }}">
-        </video>
-    </div>
-    {% else %}
-    <div style="height:100vh;display:flex;align-items:center;justify-content:center;color:white;font-size:18px;">
-        لا توجد فيديوهات بعد. ارفع أول فيديو!
-    </div>
-    {% endfor %}
+<form method="post">
+
+<input name="username" placeholder="اكتب اسمك" required>
+
+<button type="submit">دخول</button>
+
+</form>
+
+</div>
 
 </body>
 </html>
 """
 
 
-@app.route("/")
-def index():
-    return render_template_string(HTML, videos=get_videos())
+home_page = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Posts</title>
+""" + style + """
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>المنشورات</h1>
+
+<form method="post" action="/post">
+
+<textarea name="content" placeholder="اكتب منشورك" required></textarea>
+
+<button>نشر</button>
+
+</form>
+
+<hr>
+
+{% for p in posts %}
+
+<div class="post">
+
+<div class="name">
+{{p["user"]}}
+</div>
+
+<p>
+{{p["content"]}}
+</p>
+
+<div class="time">
+{{p["time"]}}
+</div>
+
+</div>
+
+{% endfor %}
+
+</div>
+
+</body>
+</html>
+"""
 
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    try:
-        print("===== بدأ رفع الفيديو =====")
+@app.route("/", methods=["GET", "POST"])
+def login():
 
-        if "video" not in request.files:
-            print("❌ لم يتم إرسال حقل video")
-            return redirect(url_for("index"))
+    if request.method == "POST":
 
-        file = request.files["video"]
+        username = request.form.get("username")
 
-        print("📄 اسم الملف:", file.filename)
+        if username:
 
-        if file.filename == "":
-            print("❌ لم يتم اختيار ملف")
-            return redirect(url_for("index"))
+            users = get_users()
 
-        if not allowed_file(file.filename):
-            print("❌ امتداد الملف غير مسموح")
-            return redirect(url_for("index"))
+            exists = False
 
-        ext = file.filename.rsplit(".", 1)[1].lower()
-        filename = f"{uuid.uuid4().hex}.{ext}"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
+            for user in users:
+                if user["name"] == username:
+                    exists = True
+                    break
 
-        print
+            if not exists:
+                users.append({
+                    "name": username,
+                    "created": str(datetime.now())
+                })
+
+                save_data(USERS_FILE, users)
+
+            session["user"] = username
+
+            return redirect(url_for("home"))
+
+    return render_template_string(login_page)
+
+
+
+@app.route("/home")
+def home():
+
+    if "user" not in session:
+        return redirect(url_for("login"))
+
+    posts = get_posts()
+
+    posts.reverse()
+
+    return render_template_string(
+        home_page,
+        posts=posts
+    )
+
+
+
+@app.route("/post", methods=["POST"])
+def create_post():
+
+    if "user" not in session:
+        return redirect(url_for("login"))
+
+    content = request.form.get("content")
+
+    if content:
+
+        posts = get_posts()
+
+        posts.append({
+            "user": session["user"],
+            "content": content,
+            "time": str(datetime.now())
+        })
+
+        save_data(POSTS_FILE, posts)
+
+    return redirect(url_for("home"))
+
+
+
+@app.route("/logout")
+def logout():
+
+    session.clear()
+
+    return redirect(url_for("login"))
+
+
+
+if __name__ == "__main__":
+
+    app.run(
+        host="0.0.0.0",
+        port=5000
+            )
