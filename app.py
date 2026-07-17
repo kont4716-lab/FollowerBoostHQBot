@@ -72,6 +72,10 @@ home_page = """
 <p>{{ p.get("content", "") }}</p>
 <div class="time">{{ p.get("time", "") }}</div>
 <p>❤️ {{ p.get("likes", 0) }}</p>
+<form method="post" action="/like" style="display:inline;">
+<input type="hidden" name="post_id" value="{{ loop.index0 }}">
+<button type="submit">إعجاب</button>
+</form>
 </div>
 {% endfor %}
 <a href="/logout">تسجيل خروج</a>
@@ -117,17 +121,3 @@ def create_post():
         posts.append({
             "user": session["user"],
             "content": content,
-            "time": str(datetime.now()),
-            "likes": 0
-        })
-        save_data(POSTS_FILE, posts)
-    return redirect(url_for("home"))
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
-    
