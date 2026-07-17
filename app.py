@@ -20,7 +20,7 @@ def get_videos():
         return []
     videos = []
     for f in os.listdir(UPLOAD_FOLDER):
-        if f == ".gitkeep":
+        if f == ".gitkeep" or f.startswith('.'):
             continue
         if allowed_file(f):
             videos.append(f)
@@ -116,31 +116,27 @@ def index():
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    if "video" not in request.files:
-        return redirect(url_for("index"))
+    try:
+        print("===== بدأ رفع الفيديو =====")
 
-    file = request.files["video"]
+        if "video" not in request.files:
+            print("❌ لم يتم إرسال حقل video")
+            return redirect(url_for("index"))
 
-    if file.filename == "":
-        return redirect(url_for("index"))
+        file = request.files["video"]
 
-    if file and allowed_file(file.filename):
+        print("📄 اسم الملف:", file.filename)
+
+        if file.filename == "":
+            print("❌ لم يتم اختيار ملف")
+            return redirect(url_for("index"))
+
+        if not allowed_file(file.filename):
+            print("❌ امتداد الملف غير مسموح")
+            return redirect(url_for("index"))
+
         ext = file.filename.rsplit(".", 1)[1].lower()
         filename = f"{uuid.uuid4().hex}.{ext}"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
-        file.save(filepath)
-        print(f"✅ Video uploaded: {filename}")  # للـ logs
 
-    return redirect(url_for("index"))
-
-
-@app.route("/uploads/<filename>")
-def uploaded_file(filename):
-    if filename == ".gitkeep":
-        return "Not found", 404
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+        print
