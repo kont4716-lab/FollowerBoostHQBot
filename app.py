@@ -30,36 +30,26 @@ def get_posts():
 
 style = """
 <style>
-body {font-family: Arial, sans-serif; background:#f2f2f2; margin:0; padding:0;}
-.container {width:90%; max-width:600px; margin:40px auto; background:white; padding:20px; border-radius:15px; box-shadow:0 0 10px #ccc;}
+body {font-family: Arial, sans-serif; background:#f2f2f2; margin:0; padding:0; transition: background 0.3s;}
+body.dark {background:#121212; color:white;}
+.container {width:90%; max-width:600px; margin:40px auto; background:white; padding:20px; border-radius:15px; box-shadow:0 0 10px #ccc; transition: background 0.3s;}
+body.dark .container {background:#1e1e1e;}
 h1 {text-align:center;}
 input, textarea {width:100%; padding:12px; margin:8px 0; border:1px solid #ccc; border-radius:8px; box-sizing:border-box;}
 button {width:100%; padding:12px; background:#1976d2; color:white; border:none; border-radius:8px; cursor:pointer;}
 button:hover {background:#125aa0;}
 .post {background:#fafafa; padding:15px; margin:15px 0; border-radius:10px; border:1px solid #ddd;}
+body.dark .post {background:#2a2a2a;}
 .name {font-weight:bold; color:#1976d2;}
 .time {font-size:12px; color:#777;}
 </style>
-"""
-
-login_page = """
-<!DOCTYPE html>
-<html><head><title>Login</title>""" + style + """</head><body>
-<div class="container">
-<h1>الدخول</h1>
-<form method="post">
-<input name="username" placeholder="اسم المستخدم" required>
-<input name="password" type="password" placeholder="كلمة المرور" required>
-<button type="submit">دخول</button>
-</form>
-<a href="/register">تسجيل حساب جديد</a>
-</div></body></html>
 """
 
 home_page = """
 <!DOCTYPE html>
 <html><head><title>Posts</title>""" + style + """</head><body>
 <div class="container">
+<a href="/settings" style="float:right; padding:10px;">⚙️ الإعدادات</a>
 <h1>المنشورات</h1>
 <form method="post" action="/post">
 <textarea name="content" placeholder="اكتب منشورك" required></textarea>
@@ -72,14 +62,32 @@ home_page = """
 <p>{{ p.get("content", "") }}</p>
 <div class="time">{{ p.get("time", "") }}</div>
 <p>❤️ {{ p.get("likes", 0) }}</p>
-<form method="post" action="/like" style="display:inline;">
-<input type="hidden" name="post_id" value="{{ loop.index0 }}">
-<button type="submit">إعجاب</button>
-</form>
 </div>
 {% endfor %}
 <a href="/logout">تسجيل خروج</a>
-</div></body></html>
+</div>
+<script>
+if (localStorage.getItem('darkMode') === 'true') document.body.classList.add('dark');
+</script>
+</body></html>
+"""
+
+settings_page = """
+<!DOCTYPE html>
+<html><head><title>Settings</title>""" + style + """</head><body>
+<div class="container">
+<h1>الإعدادات</h1>
+<button onclick="toggleDarkMode()">🌙 تفعيل الوضع المظلم</button>
+<br><br>
+<a href="/home">العودة للرئيسية</a>
+</div>
+<script>
+function toggleDarkMode() {
+    document.body.classList.toggle('dark');
+    localStorage.setItem('darkMode', document.body.classList.contains('dark'));
+}
+</script>
+</body></html>
 """
 
 @app.route("/", methods=["GET", "POST"])
@@ -111,6 +119,12 @@ def home():
     posts.reverse()
     return render_template_string(home_page, posts=posts)
 
+@app.route("/settings")
+def settings():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    return render_template_string(settings_page)
+
 @app.route("/post", methods=["POST"])
 def create_post():
     if "user" not in session:
@@ -124,17 +138,6 @@ def create_post():
             "time": str(datetime.now()),
             "likes": 0
         })
-        save_data(POSTS_FILE, posts)
-    return redirect(url_for("home"))
-
-@app.route("/like", methods=["POST"])
-def like_post():
-    if "user" not in session:
-        return redirect(url_for("login"))
-    post_id = int(request.form.get("post_id", -1))
-    posts = get_posts()
-    if 0 <= post_id < len(posts):
-        posts[post_id]["likes"] = posts[post_id].get("likes", 0) + 1
         save_data(POSTS_FILE, posts)
     return redirect(url_for("home"))
 
