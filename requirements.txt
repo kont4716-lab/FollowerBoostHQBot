@@ -1,4 +1,3 @@
-Flask
-gunicorn
-Flask-Login
-Werkzeug
+flask
+flask-socketio
+eventlet
