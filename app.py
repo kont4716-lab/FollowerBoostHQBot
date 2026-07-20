@@ -2,7 +2,6 @@ from flask import Flask, request, render_template_string, jsonify, send_from_dir
 import os
 import uuid
 import json
-from datetime import datetime
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
@@ -16,7 +15,7 @@ def allowed_file(filename):
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# تحميل أو إنشاء ملف اللايكات
+# تحميل اللايكات
 if os.path.exists(LIKE_FILE):
     with open(LIKE_FILE, 'r', encoding='utf-8') as f:
         likes_data = json.load(f)
@@ -54,7 +53,10 @@ HTML_TEMPLATE = '''
             background:#ff0050; color:white; border:none; padding:15px 30px; 
             border-radius:50px; font-size:17px; font-weight:700; z-index:200;
         }
-        #progress-container { position:fixed; bottom:100px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.9); padding:12px 25px; border-radius:30px; display:none; z-index:300; }
+        #progress-container { 
+            position:fixed; bottom:100px; left:50%; transform:translateX(-50%);
+            background:rgba(0,0,0,0.9); padding:12px 25px; border-radius:30px; display:none; z-index:300;
+        }
     </style>
 </head>
 <body>
@@ -74,7 +76,8 @@ HTML_TEMPLATE = '''
     <script>
         let username = localStorage.getItem('username');
         if (!username) {
-            username = prompt("أدخل اسمك (سيُستخدم لحفظ اللايكات):") || "مستخدم" + Math.floor(Math.random()*1000);
+            username = prompt("أدخل اسمك ليتم حفظ اللايكات:");
+            if (!username) username = "مستخدم" + Math.floor(Math.random()*9999);
             localStorage.setItem('username', username);
         }
 
@@ -122,14 +125,12 @@ HTML_TEMPLATE = '''
                 body: JSON.stringify({file: file, username: localStorage.getItem('username')})
             });
             const data = await res.json();
-            
             if (data.success) {
-                btn.classList.toggle('liked');
+                btn.classList.toggle('liked', data.liked);
                 btn.querySelector('.like-count').textContent = data.count;
             }
         }
 
-        // Auto play
         document.getElementById('feed').addEventListener('scroll', () => {
             document.querySelectorAll('video').forEach(video => {
                 const rect = video.getBoundingClientRect();
@@ -141,7 +142,6 @@ HTML_TEMPLATE = '''
             });
         });
 
-        // Upload
         document.getElementById('file-input').addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (!file) return;
@@ -187,7 +187,8 @@ def index():
 @app.route('/upload', methods=['POST'])
 def upload():
     try:
-        if 'file' not in request.files: return jsonify({'message': 'لم يتم اختيار ملف'}), 400
+        if 'file' not in request.files:
+            return jsonify({'message': 'لم يتم اختيار ملف'}), 400
         file = request.files['file']
         if file.filename == '' or not allowed_file(file.filename):
             return jsonify({'message': 'نوع الملف غير مدعوم'}), 400
@@ -222,9 +223,13 @@ def like():
         likes_data[file]["users"].append(user)
         likes_data[file]["count"] += 1
         save_likes()
-        return jsonify({"success": True, "count": likes_data[file]["count"]})
+        return jsonify({"success": True, "count": likes_data[file]["count"], "liked": True})
     else:
-        return jsonify({"success": False, "message": "already liked"})
+        # إزالة اللايك (اختياري)
+        likes_data[file]["users"].remove(user)
+        likes_data[file]["count"] -= 1
+        save_likes()
+        return jsonify({"success": True, "count": likes_data[file]["count"], "liked": False})
 
 @app.route('/uploads/<filename>')
 def serve_file(filename):
