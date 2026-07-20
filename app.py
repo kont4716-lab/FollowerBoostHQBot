@@ -1,21 +1,15 @@
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template_string, jsonify, send_from_directory
 import os
 import uuid
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max upload
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 
-# Allowed extensions
-ALLOWED_EXTENSIONS = {
-    'jpg', 'jpeg', 'png', 'gif', 'webp',
-    'mp4', 'mov', 'avi', 'mkv', 'webm'
-}
+ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'avi', 'mkv', 'webm'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Create uploads directory
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -25,261 +19,216 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>رفع ملفات</title>
+    <title>Boost Feed</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
         
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Cairo', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            margin: 0;
-            padding: 0;
-            min-height: 100vh;
+            background: #000;
+            color: white;
+            overflow: hidden;
+            height: 100vh;
+        }
+        
+        .header {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            z-index: 100;
+            text-align: center;
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .tiktok-container {
+            height: 100vh;
+            overflow-y: scroll;
+            scroll-snap-type: y mandatory;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .media-slide {
+            height: 100vh;
+            width: 100%;
+            scroll-snap-align: start;
+            position: relative;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #333;
+            background: #000;
         }
-        
-        .container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
-            width: 90%;
-            max-width: 500px;
-            padding: 40px 30px;
-            text-align: center;
+
+        .media-slide img, .media-slide video {
+            max-height: 100%;
+            max-width: 100%;
+            object-fit: contain;
         }
-        
-        h1 {
-            color: #4a4a4a;
-            margin-bottom: 30px;
-            font-size: 28px;
+
+        .media-slide video {
+            width: 100%;
         }
-        
-        .upload-area {
-            border: 3px dashed #667eea;
-            border-radius: 15px;
-            padding: 40px 20px;
-            margin: 20px 0;
-            transition: all 0.3s ease;
-            cursor: pointer;
+
+        .upload-overlay {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 200;
+            background: rgba(0,0,0,0.8);
+            padding: 12px 30px;
+            border-radius: 50px;
+            display: flex;
+            gap: 15px;
         }
-        
-        .upload-area:hover {
-            background: #f8f9ff;
-            border-color: #4a4a4a;
-        }
-        
-        .upload-area.dragover {
-            background: #e3f2fd;
-            border-color: #2196f3;
-        }
-        
-        input[type="file"] {
-            display: none;
-        }
-        
+
         .btn {
-            background: #667eea;
+            background: #ff0050;
             color: white;
             border: none;
-            padding: 14px 40px;
-            font-size: 18px;
+            padding: 14px 28px;
             border-radius: 50px;
-            cursor: pointer;
-            margin: 15px 5px;
-            transition: all 0.3s ease;
-            font-weight: 600;
-        }
-        
-        .btn:hover {
-            background: #5a67d8;
-            transform: translateY(-3px);
-        }
-        
-        .btn:disabled {
-            background: #a0a0a0;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        #progress-container {
-            margin: 25px 0;
-            display: none;
-        }
-        
-        .progress-bar {
-            height: 12px;
-            background: #e0e0e0;
-            border-radius: 20px;
-            overflow: hidden;
-            margin-bottom: 10px;
-        }
-        
-        .progress {
-            height: 100%;
-            background: linear-gradient(90deg, #667eea, #764ba2);
-            width: 0%;
-            transition: width 0.3s ease;
-            border-radius: 20px;
-        }
-        
-        #status {
             font-size: 16px;
-            margin: 15px 0;
-            min-height: 24px;
-        }
-        
-        .success {
-            color: #4caf50;
             font-weight: 600;
+            cursor: pointer;
         }
-        
-        .error {
-            color: #f44336;
-            font-weight: 600;
+
+        #progress-container {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            padding: 10px 20px;
+            border-radius: 30px;
+            display: none;
+            z-index: 300;
         }
-        
-        .file-info {
-            margin: 15px 0;
-            font-size: 14px;
-            color: #666;
+
+        .success-msg {
+            position: fixed;
+            top: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #4caf50;
+            color: white;
+            padding: 12px 25px;
+            border-radius: 50px;
+            z-index: 400;
+            display: none;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>رفع صورة أو فيديو</h1>
-        
-        <div class="upload-area" id="drop-area">
-            <p>اسحب الملف هنا أو</p>
-            <button class="btn" onclick="document.getElementById('file-input').click()">اختر ملف</button>
-            <input type="file" id="file-input" accept="image/*,video/*">
-            <div class="file-info" id="file-name"></div>
-        </div>
-        
-        <button class="btn" id="upload-btn" onclick="uploadFile()" disabled>رفع الملف</button>
-        
-        <div id="progress-container">
-            <div class="progress-bar">
-                <div class="progress" id="progress"></div>
-            </div>
-            <div id="status"></div>
-        </div>
-        
-        <div id="result"></div>
+    <div class="header">FollowerBoost Feed</div>
+
+    <div class="tiktok-container" id="feed">
+        <!-- Media will be loaded here by JS -->
     </div>
 
+    <div class="upload-overlay">
+        <button class="btn" onclick="document.getElementById('file-input').click()">رفع صورة/فيديو</button>
+        <input type="file" id="file-input" accept="image/*,video/*" style="display:none">
+    </div>
+
+    <div id="progress-container">
+        <div style="color:white; margin-bottom:8px;">جاري الرفع...</div>
+        <div style="height:6px; background:#333; border-radius:10px; overflow:hidden;">
+            <div id="progress" style="height:100%; width:0%; background:#ff0050; transition:width 0.3s;"></div>
+        </div>
+    </div>
+
+    <div class="success-msg" id="success-msg"></div>
+
     <script>
-        let selectedFile = null;
-        
-        const dropArea = document.getElementById('drop-area');
-        const fileInput = document.getElementById('file-input');
-        const uploadBtn = document.getElementById('upload-btn');
-        const fileNameDisplay = document.getElementById('file-name');
-        
-        // Drag and drop handlers
-        dropArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropArea.classList.add('dragover');
-        });
-        
-        dropArea.addEventListener('dragleave', () => {
-            dropArea.classList.remove('dragover');
-        });
-        
-        dropArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropArea.classList.remove('dragover');
-            const file = e.dataTransfer.files[0];
-            handleFile(file);
-        });
-        
-        fileInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            handleFile(file);
-        });
-        
-        function handleFile(file) {
-            if (!file) return;
+        let currentFiles = [];
+
+        async function loadFeed() {
+            const res = await fetch('/files');
+            currentFiles = await res.json();
             
-            const ext = file.name.split('.').pop().toLowerCase();
-            const allowed = ['jpg','jpeg','png','gif','webp','mp4','mov','avi','mkv','webm'];
-            
-            if (!allowed.includes(ext)) {
-                alert('نوع الملف غير مدعوم. يرجى اختيار صورة أو فيديو.');
-                return;
-            }
-            
-            selectedFile = file;
-            fileNameDisplay.textContent = `الملف المختار: \( {file.name} ( \){(file.size / (1024*1024)).toFixed(2)} MB)`;
-            uploadBtn.disabled = false;
+            const feed = document.getElementById('feed');
+            feed.innerHTML = '';
+
+            currentFiles.forEach(file => {
+                const isVideo = file.endsWith('.mp4') || file.endsWith('.mov') || 
+                               file.endsWith('.webm') || file.endsWith('.avi') || file.endsWith('.mkv');
+                
+                const slide = document.createElement('div');
+                slide.className = 'media-slide';
+                
+                if (isVideo) {
+                    slide.innerHTML = `
+                        <video src="/uploads/${file}" loop muted playsinline></video>
+                    `;
+                } else {
+                    slide.innerHTML = `
+                        <img src="/uploads/${file}" alt="media">
+                    `;
+                }
+                feed.appendChild(slide);
+            });
         }
-        
-        function uploadFile() {
-            if (!selectedFile) return;
-            
+
+        // TikTok-like auto play
+        const feed = document.getElementById('feed');
+        feed.addEventListener('scroll', () => {
+            const videos = feed.querySelectorAll('video');
+            const scrollPos = feed.scrollTop;
+            const slideHeight = window.innerHeight;
+
+            videos.forEach(video => {
+                const slide = video.parentElement;
+                const slideTop = slide.offsetTop;
+                if (scrollPos >= slideTop - 100 && scrollPos <= slideTop + 100) {
+                    video.play();
+                } else {
+                    video.pause();
+                }
+            });
+        });
+
+        // Upload
+        document.getElementById('file-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
             const progressContainer = document.getElementById('progress-container');
             const progressBar = document.getElementById('progress');
-            const status = document.getElementById('status');
-            const result = document.getElementById('result');
-            
+            const successMsg = document.getElementById('success-msg');
+
             progressContainer.style.display = 'block';
-            uploadBtn.disabled = true;
-            result.innerHTML = '';
-            status.textContent = 'جاري الرفع...';
-            
+
             const formData = new FormData();
-            formData.append('file', selectedFile);
-            
+            formData.append('file', file);
+
             const xhr = new XMLHttpRequest();
-            
             xhr.open('POST', '/upload', true);
-            
-            xhr.upload.onprogress = function(e) {
+
+            xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
                     const percent = Math.round((e.loaded / e.total) * 100);
                     progressBar.style.width = percent + '%';
-                    status.textContent = `جاري الرفع... ${percent}%`;
                 }
             };
-            
-            xhr.onload = function() {
+
+            xhr.onload = () => {
+                progressContainer.style.display = 'none';
                 if (xhr.status === 200) {
-                    const response = JSON.parse(xhr.responseText);
-                    progressBar.style.width = '100%';
-                    status.innerHTML = `<span class="success">✅ ${response.message}</span>`;
-                    result.innerHTML = `<p style="color:#4caf50; margin-top:20px;">تم حفظ الملف بنجاح!</p>`;
-                    
-                    // Reset form after 3 seconds
-                    setTimeout(() => {
-                        resetForm();
-                    }, 3000);
-                } else {
-                    const errorMsg = xhr.responseText || 'حدث خطأ أثناء الرفع';
-                    status.innerHTML = `<span class="error">❌ ${errorMsg}</span>`;
-                    uploadBtn.disabled = false;
+                    successMsg.textContent = '✅ تم الرفع بنجاح!';
+                    successMsg.style.display = 'block';
+                    setTimeout(() => successMsg.style.display = 'none', 2500);
+                    loadFeed();
                 }
             };
-            
-            xhr.onerror = function() {
-                status.innerHTML = `<span class="error">❌ خطأ في الاتصال</span>`;
-                uploadBtn.disabled = false;
-            };
-            
+
             xhr.send(formData);
-        }
-        
-        function resetForm() {
-            selectedFile = null;
-            fileNameDisplay.textContent = '';
-            document.getElementById('file-input').value = '';
-            document.getElementById('progress-container').style.display = 'none';
-            document.getElementById('progress').style.width = '0%';
-            document.getElementById('upload-btn').disabled = true;
-            document.getElementById('result').innerHTML = '';
-        }
+        });
+
+        // Initial load
+        window.onload = loadFeed;
     </script>
 </body>
 </html>
@@ -295,24 +244,25 @@ def upload():
         return jsonify({'message': 'لم يتم اختيار ملف'}), 400
     
     file = request.files['file']
+    if file.filename == '' or not allowed_file(file.filename):
+        return jsonify({'message': 'ملف غير صالح'}), 400
     
-    if file.filename == '':
-        return jsonify({'message': 'لم يتم اختيار ملف'}), 400
-    
-    if not allowed_file(file.filename):
-        return jsonify({'message': 'نوع الملف غير مسموح به'}), 400
-    
-    # Generate unique filename
     ext = file.filename.rsplit('.', 1)[1].lower()
     unique_filename = f"{uuid.uuid4()}.{ext}"
     
     filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
     file.save(filepath)
     
-    return jsonify({
-        'message': 'تم الرفع بنجاح',
-        'filename': unique_filename
-    })
+    return jsonify({'message': 'تم الرفع بنجاح', 'filename': unique_filename})
+
+@app.route('/files')
+def get_files():
+    files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
+    return jsonify(files)
+
+@app.route('/uploads/<filename>')
+def serve_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
