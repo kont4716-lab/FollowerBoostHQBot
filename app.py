@@ -225,7 +225,6 @@ def like():
         save_likes()
         return jsonify({"success": True, "count": likes_data[file]["count"], "liked": True})
     else:
-        # إزالة اللايك (اختياري)
         likes_data[file]["users"].remove(user)
         likes_data[file]["count"] -= 1
         save_likes()
