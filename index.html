@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>لعبة الدودة</title>
+
+<style>
+body{
+    margin:0;
+    background:#111;
+    color:white;
+    font-family:Arial;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+}
+
+h1{
+    margin-top:15px;
+}
+
+canvas{
+    background:#222;
+    border:3px solid #0f0;
+    margin-top:10px;
+}
+
+#score{
+    font-size:22px;
+    margin-top:10px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>🐍 لعبة الدودة</h1>
+<div id="score">النقاط: 0</div>
+
+<canvas id="game" width="400" height="400"></canvas>
+
+<script>
+
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+
+const box=20;
+
+let snake=[
+{x:10,y:10}
+];
+
+let food={
+x:Math.floor(Math.random()*20),
+y:Math.floor(Math.random()*20)
+};
+
+let dx=1;
+let dy=0;
+
+let score=0;
+
+document.addEventListener("keydown",changeDirection);
+
+function changeDirection(e){
+
+if(e.key=="ArrowUp" && dy==0){
+dx=0;
+dy=-1;
+}
+
+if(e.key=="ArrowDown" && dy==0){
+dx=0;
+dy=1;
+}
+
+if(e.key=="ArrowLeft" && dx==0){
+dx=-1;
+dy=0;
+}
+
+if(e.key=="ArrowRight" && dx==0){
+dx=1;
+dy=0;
+}
+
+}
+
+function draw(){
+
+ctx.fillStyle="#222";
+ctx.fillRect(0,0,400,400);
+
+ctx.fillStyle="red";
+ctx.fillRect(food.x*box,food.y*box,box,box);
+
+ctx.fillStyle="lime";
+
+for(let s of snake){
+ctx.fillRect(s.x*box,s.y*box,box,box);
+}
+
+let head={
+x:snake[0].x+dx,
+y:snake[0].y+dy
+};
+
+if(
+head.x<0||
+head.y<0||
+head.x>=20||
+head.y>=20
+){
+gameOver();
+return;
+}
+
+for(let s of snake){
+if(head.x==s.x&&head.y==s.y){
+gameOver();
+return;
+}
+}
+
+snake.unshift(head);
+
+if(head.x==food.x&&head.y==food.y){
+
+score++;
+document.getElementById("score").innerHTML="النقاط: "+score;
+
+food={
+x:Math.floor(Math.random()*20),
+y:Math.floor(Math.random()*20)
+};
+
+}else{
+snake.pop();
+}
+
+}
+
+function gameOver(){
+
+clearInterval(game);
+
+alert("انتهت اللعبة\nالنقاط: "+score);
+
+location.reload();
+
+}
+
+let game=setInterval(draw,150);
+
+</script>
+
+</body>
+    </html>
