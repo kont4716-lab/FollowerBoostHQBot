@@ -3,7 +3,7 @@ import os
 import uuid
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'avi', 'mkv', 'webm'}
 
@@ -19,58 +19,86 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Boost Feed</title>
+    <title>رفع ملفات</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family:'Cairo',sans-serif; background:#000; color:white; overflow:hidden; height:100vh; }
-        .header { position:fixed; top:0; left:0; right:0; background:rgba(0,0,0,0.9); padding:15px; text-align:center; font-size:21px; font-weight:700; z-index:100; }
-        .tiktok-container { height:100vh; overflow-y:scroll; scroll-snap-type:y mandatory; -webkit-overflow-scrolling:touch; }
-        .media-slide { 
-            height:100vh; scroll-snap-align:start; display:flex; align-items:center; justify-content:center; 
-            background:#111; position:relative; 
-        }
-        .media-slide img, .media-slide video { 
-            max-height:100%; max-width:100%; object-fit:contain; 
-        }
-        .controls {
-            position: absolute;
-            bottom: 30px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.7);
-            padding: 8px 20px;
-            border-radius: 30px;
-            display: none;
-            z-index: 10;
-        }
-        .media-slide:hover .controls { display: flex; gap: 15px; }
-        .btn-control {
-            background: rgba(255,255,255,0.2);
-            color: white;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 20px;
-            cursor: pointer;
-            font-size: 14px;
-        }
-        .upload-overlay { 
-            position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:200; 
-            background:rgba(0,0,0,0.9); padding:12px 35px; border-radius:50px; box-shadow:0 5px 20px rgba(0,0,0,0.5);
-        }
-        .btn { background:#ff0050; color:white; border:none; padding:15px 35px; border-radius:50px; font-size:17px; font-weight:700; cursor:pointer; }
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600&display=swap');
+        body { font-family:'Cairo',sans-serif; background:linear-gradient(135deg,#667eea,#764ba2); margin:0; padding:0; min-height:100vh; color:#333; }
+        .container { background:white; border-radius:20px; box-shadow:0 20px 40px rgba(0,0,0,0.2); width:90%; max-width:520px; margin:40px auto; padding:30px; text-align:center; }
+        h1 { margin-bottom:30px; }
+        .upload-area { border:3px dashed #667eea; border-radius:15px; padding:40px 20px; margin:20px 0; cursor:pointer; }
+        .upload-area:hover { background:#f8f9ff; }
+        .btn { background:#667eea; color:white; border:none; padding:14px 40px; font-size:18px; border-radius:50px; margin:15px 5px; cursor:pointer; font-weight:600; }
+        #progress-container { margin:25px 0; display:none; }
+        .progress-bar { height:12px; background:#e0e0e0; border-radius:20px; overflow:hidden; }
+        .progress { height:100%; background:linear-gradient(90deg,#667eea,#764ba2); width:0%; transition:width 0.4s; }
+        .tiktok-container { margin-top:30px; max-height:500px; overflow-y:auto; border:1px solid #ddd; border-radius:10px; }
+        .media-slide { height:400px; display:flex; align-items:center; justify-content:center; background:#000; position:relative; margin:10px 0; }
+        .media-slide video { max-height:100%; max-width:100%; }
+        .controls { position:absolute; bottom:10px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.6); padding:5px 15px; border-radius:20px; }
     </style>
 </head>
 <body>
-    <div class="header">FollowerBoost Feed</div>
-    <div class="tiktok-container" id="feed"></div>
-
-    <div class="upload-overlay">
-        <button class="btn" onclick="document.getElementById('file-input').click()">📤 رفع صورة أو فيديو</button>
-        <input type="file" id="file-input" accept="image/*,video/*" style="display:none;">
+    <div class="container">
+        <h1>رفع صورة أو فيديو</h1>
+        
+        <div class="upload-area" id="drop-area">
+            <p>اسحب الملف هنا أو</p>
+            <button class="btn" onclick="document.getElementById('file-input').click()">اختر ملف</button>
+            <input type="file" id="file-input" accept="image/*,video/*" style="display:none;">
+        </div>
+        
+        <button class="btn" id="upload-btn" onclick="uploadFile()" disabled>رفع الملف</button>
+        
+        <div id="progress-container">
+            <div class="progress-bar"><div class="progress" id="progress"></div></div>
+            <div id="status">جاري الرفع...</div>
+        </div>
+        
+        <div class="tiktok-container" id="feed"></div>
     </div>
 
     <script>
+        let selectedFile = null;
+
+        // رفع الملف
+        function uploadFile() {
+            if (!selectedFile) return;
+            const progressContainer = document.getElementById('progress-container');
+            const progressBar = document.getElementById('progress');
+            const status = document.getElementById('status');
+
+            progressContainer.style.display = 'block';
+            status.textContent = 'جاري الرفع...';
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/upload', true);
+
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    progressBar.style.width = percent + '%';
+                    status.textContent = `جاري الرفع... ${percent}%`;
+                }
+            };
+
+            xhr.onload = () => {
+                progressContainer.style.display = 'none';
+                if (xhr.status === 200) {
+                    status.innerHTML = '<span style="color:green">✅ تم الرفع بنجاح</span>';
+                    loadFeed();
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    status.innerHTML = '<span style="color:red">❌ فشل الرفع</span>';
+                }
+            };
+
+            xhr.send(formData);
+        }
+
+        // تحميل الفيديوهات والصور
         async function loadFeed() {
             const res = await fetch('/files');
             const files = await res.json();
@@ -84,11 +112,7 @@ HTML_TEMPLATE = '''
                 
                 if (isVideo) {
                     slide.innerHTML = `
-                        <video src="/uploads/${file}" loop playsinline></video>
-                        <div class="controls">
-                            <button class="btn-control" onclick="toggleMute(this)">🔊</button>
-                            <button class="btn-control" onclick="togglePlay(this)">⏸️</button>
-                        </div>
+                        <video src="/uploads/${file}" loop playsinline controls></video>
                     `;
                 } else {
                     slide.innerHTML = `<img src="/uploads/${file}" alt="">`;
@@ -97,65 +121,10 @@ HTML_TEMPLATE = '''
             });
         }
 
-        function toggleMute(btn) {
-            const video = btn.parentElement.parentElement.querySelector('video');
-            video.muted = !video.muted;
-            btn.textContent = video.muted ? '🔇' : '🔊';
-        }
-
-        function togglePlay(btn) {
-            const video = btn.parentElement.parentElement.querySelector('video');
-            if (video.paused) {
-                video.play();
-                btn.textContent = '⏸️';
-            } else {
-                video.pause();
-                btn.textContent = '▶️';
-            }
-        }
-
-        // Auto play when scrolling
-        document.getElementById('feed').addEventListener('scroll', () => {
-            const videos = document.querySelectorAll('video');
-            const scrollPos = document.getElementById('feed').scrollTop;
-            
-            videos.forEach(video => {
-                const rect = video.getBoundingClientRect();
-                if (rect.top < window.innerHeight * 0.6 && rect.bottom > window.innerHeight * 0.4) {
-                    video.play().catch(() => {});
-                } else {
-                    video.pause();
-                }
-            });
-        });
-
+        // اختيار الملف
         document.getElementById('file-input').addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            const formData = new FormData();
-            formData.append('file', file);
-
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/upload', true);
-
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    const percent = Math.round((e.loaded / e.total) * 100);
-                    console.log(`Progress: ${percent}%`);
-                }
-            };
-
-            xhr.onload = () => {
-                if (xhr.status === 200) {
-                    alert('✅ تم رفع الفيديو بنجاح!');
-                    loadFeed();
-                } else {
-                    alert('❌ فشل الرفع');
-                }
-            };
-
-            xhr.send(formData);
+            selectedFile = e.target.files[0];
+            document.getElementById('upload-btn').disabled = false;
         });
 
         window.onload = loadFeed;
@@ -164,7 +133,6 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
-# باقي الكود (Routes) بدون تغيير
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
