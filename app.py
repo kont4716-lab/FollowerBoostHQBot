@@ -1,9 +1,10 @@
 from flask import Flask, request, render_template_string, jsonify, send_from_directory
 import os
 import uuid
+import time
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'avi', 'mkv', 'webm'}
 
@@ -22,181 +23,66 @@ HTML_TEMPLATE = '''
     <title>Boost Feed</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
-        
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Cairo', sans-serif;
-            background: #000;
-            color: white;
-            overflow: hidden;
-            height: 100vh;
-        }
-        
-        .header {
-            position: fixed;
-            top: 0; left: 0; right: 0;
-            background: rgba(0,0,0,0.7);
-            padding: 15px;
-            z-index: 100;
-            text-align: center;
-            font-size: 20px;
-            font-weight: 700;
-        }
-
-        .tiktok-container {
-            height: 100vh;
-            overflow-y: scroll;
-            scroll-snap-type: y mandatory;
-            -webkit-overflow-scrolling: touch;
-        }
-
-        .media-slide {
-            height: 100vh;
-            width: 100%;
-            scroll-snap-align: start;
-            position: relative;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #000;
-        }
-
-        .media-slide img, .media-slide video {
-            max-height: 100%;
-            max-width: 100%;
-            object-fit: contain;
-        }
-
-        .media-slide video {
-            width: 100%;
-        }
-
-        .upload-overlay {
-            position: fixed;
-            bottom: 30px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 200;
-            background: rgba(0,0,0,0.8);
-            padding: 12px 30px;
-            border-radius: 50px;
-            display: flex;
-            gap: 15px;
-        }
-
-        .btn {
-            background: #ff0050;
-            color: white;
-            border: none;
-            padding: 14px 28px;
-            border-radius: 50px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-
-        #progress-container {
-            position: fixed;
-            bottom: 100px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.8);
-            padding: 10px 20px;
-            border-radius: 30px;
-            display: none;
-            z-index: 300;
-        }
-
-        .success-msg {
-            position: fixed;
-            top: 80px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #4caf50;
-            color: white;
-            padding: 12px 25px;
-            border-radius: 50px;
-            z-index: 400;
-            display: none;
-        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:'Cairo',sans-serif; background:#000; color:white; overflow:hidden; height:100vh; }
+        .header { position:fixed; top:0; left:0; right:0; background:rgba(0,0,0,0.8); padding:15px; text-align:center; font-size:20px; z-index:100; }
+        .tiktok-container { height:100vh; overflow-y:scroll; scroll-snap-type:y mandatory; }
+        .media-slide { height:100vh; scroll-snap-align:start; display:flex; align-items:center; justify-content:center; background:#000; position:relative; }
+        .media-slide img, .media-slide video { max-height:100%; max-width:100%; object-fit:contain; }
+        .upload-overlay { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:200; background:rgba(0,0,0,0.85); padding:12px 30px; border-radius:50px; }
+        .btn { background:#ff0050; color:white; border:none; padding:14px 32px; border-radius:50px; font-size:17px; font-weight:600; cursor:pointer; }
+        #progress-container { position:fixed; bottom:100px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.9); padding:15px 25px; border-radius:30px; display:none; z-index:300; width:80%; max-width:400px; }
+        .success-msg { position:fixed; top:80px; left:50%; transform:translateX(-50%); background:#4caf50; padding:12px 30px; border-radius:50px; z-index:400; display:none; }
     </style>
 </head>
 <body>
     <div class="header">FollowerBoost Feed</div>
-
-    <div class="tiktok-container" id="feed">
-        <!-- Media will be loaded here by JS -->
-    </div>
+    <div class="tiktok-container" id="feed"></div>
 
     <div class="upload-overlay">
-        <button class="btn" onclick="document.getElementById('file-input').click()">رفع صورة/فيديو</button>
-        <input type="file" id="file-input" accept="image/*,video/*" style="display:none">
+        <button class="btn" onclick="document.getElementById('file-input').click()">رفع صورة أو فيديو</button>
+        <input type="file" id="file-input" accept="image/*,video/*" style="display:none;">
     </div>
 
     <div id="progress-container">
-        <div style="color:white; margin-bottom:8px;">جاري الرفع...</div>
-        <div style="height:6px; background:#333; border-radius:10px; overflow:hidden;">
-            <div id="progress" style="height:100%; width:0%; background:#ff0050; transition:width 0.3s;"></div>
+        <div style="margin-bottom:10px;">جاري رفع الفيديو... <span id="percent">0%</span></div>
+        <div style="height:8px;background:#333;border-radius:10px;overflow:hidden;">
+            <div id="progress" style="height:100%;width:0%;background:linear-gradient(90deg,#ff0050,#ff8a00);transition:width 0.4s ease;"></div>
         </div>
+        <div id="status" style="font-size:14px;margin-top:8px;color:#ccc;">0 MB / 0 MB</div>
     </div>
 
     <div class="success-msg" id="success-msg"></div>
 
     <script>
-        let currentFiles = [];
-
         async function loadFeed() {
             const res = await fetch('/files');
-            currentFiles = await res.json();
-            
+            const files = await res.json();
             const feed = document.getElementById('feed');
             feed.innerHTML = '';
 
-            currentFiles.forEach(file => {
-                const isVideo = file.endsWith('.mp4') || file.endsWith('.mov') || 
-                               file.endsWith('.webm') || file.endsWith('.avi') || file.endsWith('.mkv');
-                
+            files.forEach(file => {
+                const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(file);
                 const slide = document.createElement('div');
                 slide.className = 'media-slide';
                 
                 if (isVideo) {
-                    slide.innerHTML = `
-                        <video src="/uploads/${file}" loop muted playsinline></video>
-                    `;
+                    slide.innerHTML = `<video src="/uploads/${file}" loop muted playsinline></video>`;
                 } else {
-                    slide.innerHTML = `
-                        <img src="/uploads/${file}" alt="media">
-                    `;
+                    slide.innerHTML = `<img src="/uploads/${file}" alt="">`;
                 }
                 feed.appendChild(slide);
             });
         }
 
-        // TikTok-like auto play
-        const feed = document.getElementById('feed');
-        feed.addEventListener('scroll', () => {
-            const videos = feed.querySelectorAll('video');
-            const scrollPos = feed.scrollTop;
-            const slideHeight = window.innerHeight;
-
-            videos.forEach(video => {
-                const slide = video.parentElement;
-                const slideTop = slide.offsetTop;
-                if (scrollPos >= slideTop - 100 && scrollPos <= slideTop + 100) {
-                    video.play();
-                } else {
-                    video.pause();
-                }
-            });
-        });
-
-        // Upload
         document.getElementById('file-input').addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
 
             const progressContainer = document.getElementById('progress-container');
             const progressBar = document.getElementById('progress');
+            const percentText = document.getElementById('percent');
+            const status = document.getElementById('status');
             const successMsg = document.getElementById('success-msg');
 
             progressContainer.style.display = 'block';
@@ -211,23 +97,30 @@ HTML_TEMPLATE = '''
                 if (e.lengthComputable) {
                     const percent = Math.round((e.loaded / e.total) * 100);
                     progressBar.style.width = percent + '%';
+                    percentText.textContent = percent + '%';
+                    
+                    const loadedMB = (e.loaded / (1024*1024)).toFixed(1);
+                    const totalMB = (e.total / (1024*1024)).toFixed(1);
+                    status.textContent = `${loadedMB} MB / ${totalMB} MB`;
                 }
             };
 
             xhr.onload = () => {
                 progressContainer.style.display = 'none';
                 if (xhr.status === 200) {
-                    successMsg.textContent = '✅ تم الرفع بنجاح!';
+                    successMsg.textContent = '✅ تم رفع الفيديو بنجاح!';
                     successMsg.style.display = 'block';
-                    setTimeout(() => successMsg.style.display = 'none', 2500);
+                    setTimeout(() => successMsg.style.display = 'none', 3000);
                     loadFeed();
+                } else {
+                    alert('حدث خطأ أثناء الرفع: ' + xhr.responseText);
                 }
             };
 
+            xhr.onerror = () => alert('خطأ في الاتصال');
             xhr.send(formData);
         });
 
-        // Initial load
         window.onload = loadFeed;
     </script>
 </body>
@@ -240,24 +133,29 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    if 'file' not in request.files:
-        return jsonify({'message': 'لم يتم اختيار ملف'}), 400
+    try:
+        if 'file' not in request.files:
+            return jsonify({'message': 'لم يتم اختيار ملف'}), 400
+        
+        file = request.files['file']
+        if file.filename == '' or not allowed_file(file.filename):
+            return jsonify({'message': 'نوع الملف غير مدعوم'}), 400
+
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        unique_filename = f"{uuid.uuid4()}.{ext}"
+        filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
+        
+        file.save(filepath)
+        
+        return jsonify({'message': 'تم الرفع بنجاح', 'filename': unique_filename})
     
-    file = request.files['file']
-    if file.filename == '' or not allowed_file(file.filename):
-        return jsonify({'message': 'ملف غير صالح'}), 400
-    
-    ext = file.filename.rsplit('.', 1)[1].lower()
-    unique_filename = f"{uuid.uuid4()}.{ext}"
-    
-    filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
-    file.save(filepath)
-    
-    return jsonify({'message': 'تم الرفع بنجاح', 'filename': unique_filename})
+    except Exception as e:
+        return jsonify({'message': f'خطأ: {str(e)}'}), 500
 
 @app.route('/files')
 def get_files():
     files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
+    files.sort(key=lambda x: os.path.getmtime(os.path.join(UPLOAD_FOLDER, x)), reverse=True)
     return jsonify(files)
 
 @app.route('/uploads/<filename>')
