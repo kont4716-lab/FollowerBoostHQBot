@@ -1,21 +1,30 @@
-from flask import Flask, request, render_template_string, jsonify, send_from_directory
+from flask import Flask, request, render_template_string, jsonify
 import os
 import uuid
 import json
+from supabase import create_client, Client
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # الحد الأقصى لحجم الملف 1 جيجابايت
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'avi', 'mkv', 'webm'}
 LIKE_FILE = 'likes.json'
+BUCKET_NAME = 'uploads'
+
+# إعداد Supabase باستخدام متغيرات البيئة (تعمل تلقائيًا في Render)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    supabase = None
+    print("تنبيه: لم يتم العثور على متغيرات بيئة Supabase.")
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-UPLOAD_FOLDER = 'uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# تحميل اللايكات
+# تحميل وتجهيز ملف الإعجابات
 if os.path.exists(LIKE_FILE):
     with open(LIKE_FILE, 'r', encoding='utf-8') as f:
         likes_data = json.load(f)
@@ -83,32 +92,34 @@ HTML_TEMPLATE = '''
 
         async function loadFeed() {
             const res = await fetch('/files');
-            const files = await res.json();
+            const filesData = await res.json();
             const likesRes = await fetch('/likes');
             const likes = await likesRes.json();
 
             const feed = document.getElementById('feed');
             feed.innerHTML = '';
 
-            files.forEach(file => {
-                const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(file);
+            filesData.forEach(fileObj => {
+                const fileName = fileObj.name;
+                const fileUrl = fileObj.url;
+                const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(fileName);
                 const slide = document.createElement('div');
                 slide.className = 'media-slide';
 
-                const likeInfo = likes[file] || {count: 0, users: []};
+                const likeInfo = likes[fileName] || {count: 0, users: []};
                 const isLiked = likeInfo.users.includes(username);
 
                 if (isVideo) {
                     slide.innerHTML = `
-                        <video src="/uploads/${file}" loop playsinline></video>
-                        <div class="like-btn \( {isLiked ? 'liked' : ''}" data-file=" \){file}" onclick="toggleLike(this)">
+                        <video src="${fileUrl}" loop playsinline preload="metadata"></video>
+                        <div class="like-btn ${isLiked ? 'liked' : ''}" data-file="${fileName}" onclick="toggleLike(this)">
                             ❤️ <span class="like-count">${likeInfo.count}</span>
                         </div>
                     `;
                 } else {
                     slide.innerHTML = `
-                        <img src="/uploads/${file}" alt="">
-                        <div class="like-btn \( {isLiked ? 'liked' : ''}" data-file=" \){file}" onclick="toggleLike(this)">
+                        <img src="${fileUrl}" alt="">
+                        <div class="like-btn ${isLiked ? 'liked' : ''}" data-file="${fileName}" onclick="toggleLike(this)">
                             ❤️ <span class="like-count">${likeInfo.count}</span>
                         </div>
                     `;
@@ -131,6 +142,7 @@ HTML_TEMPLATE = '''
             }
         }
 
+        // تشغيل الفيديو عند ظهوره في الشاشة
         document.getElementById('feed').addEventListener('scroll', () => {
             document.querySelectorAll('video').forEach(video => {
                 const rect = video.getBoundingClientRect();
@@ -168,7 +180,11 @@ HTML_TEMPLATE = '''
 
             xhr.onload = () => {
                 progressContainer.style.display = 'none';
-                if (xhr.status === 200) loadFeed();
+                if (xhr.status === 200) {
+                    loadFeed();
+                } else {
+                    alert("حدث خطأ أثناء الرفع، راجع السجلات");
+                }
             };
 
             xhr.send(formData);
@@ -186,6 +202,9 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload():
+    if not supabase:
+        return jsonify({'message': 'إعدادات Supabase غير متوفرة'}), 500
+        
     try:
         if 'file' not in request.files:
             return jsonify({'message': 'لم يتم اختيار ملف'}), 400
@@ -195,16 +214,47 @@ def upload():
 
         ext = file.filename.rsplit('.', 1)[1].lower()
         unique_filename = f"{uuid.uuid4()}.{ext}"
-        file.save(os.path.join(UPLOAD_FOLDER, unique_filename))
+        
+        # قراءة الملف من الذاكرة ورفعه مباشرة إلى Supabase
+        file_bytes = file.read()
+        res = supabase.storage.from_(BUCKET_NAME).upload(
+            path=unique_filename,
+            file=file_bytes,
+            file_options={"content-type": file.content_type}
+        )
+        
         return jsonify({'message': 'تم الرفع بنجاح'})
     except Exception as e:
+        print("Upload Error:", e)
         return jsonify({'message': str(e)}), 500
 
 @app.route('/files')
 def get_files():
-    files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
-    files.sort(key=lambda x: os.path.getmtime(os.path.join(UPLOAD_FOLDER, x)), reverse=True)
-    return jsonify(files)
+    if not supabase:
+        return jsonify([])
+        
+    try:
+        # جلب قائمة الملفات من Supabase
+        res = supabase.storage.from_(BUCKET_NAME).list()
+        
+        # تصفية الملفات وإزالة العناصر الفارغة، وترتيبها من الأحدث للأقدم
+        valid_files = [f for f in res if f.get('name') and f['name'] != '.emptyFolderPlaceholder']
+        valid_files.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        file_list = []
+        for f in valid_files:
+            filename = f['name']
+            # استخراج الرابط العام المباشر وعرضه في الواجهة
+            public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
+            file_list.append({
+                "name": filename,
+                "url": public_url
+            })
+            
+        return jsonify(file_list)
+    except Exception as e:
+        print("Error fetching files:", e)
+        return jsonify([])
 
 @app.route('/likes')
 def get_likes():
@@ -230,9 +280,6 @@ def like():
         save_likes()
         return jsonify({"success": True, "count": likes_data[file]["count"], "liked": False})
 
-@app.route('/uploads/<filename>')
-def serve_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
 if __name__ == '__main__':
+    # يعمل محليًا بهذا الشكل، ولكن في Render سيقوم gunicorn بالتعامل مع app
     app.run(host='0.0.0.0', port=5000, debug=False)
