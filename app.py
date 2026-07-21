@@ -195,7 +195,7 @@ HTML_TEMPLATE = '''
                 } else {
                     alert("حدث خطأ أثناء الرفع، راجع السجلات");
                 }
-                // إعادة تعيين حقل الإدخال ليتمكن من رفع نفس الملف مرة أخرى إذا أراد
+                // إعادة تعيين حقل الإدخال ليتمكن من رفع نفس الملف مرة أخرى
                 document.getElementById('file-input').value = ''; 
             };
 
@@ -255,14 +255,12 @@ def get_files():
         
         file_list = []
         
-        # إزالة الشرطة المائلة (/) من نهاية الرابط إن وجدت لتجنب الأخطاء
-        base_url = SUPABASE_URL.rstrip('/')
-        
         for f in valid_files:
             filename = f['name']
             
-            # بناء الرابط العام يدوياً (أكثر استقراراً ويعمل على جميع إصدارات المكتبة)
-            public_url = f"{base_url}/storage/v1/object/public/{BUCKET_NAME}/{filename}"
+            # جلب الرابط العام باستخدام Supabase SDK وطباعته
+            public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
+            print(public_url)
             
             file_list.append({
                 "name": filename,
@@ -299,5 +297,4 @@ def like():
         return jsonify({"success": True, "count": likes_data[file]["count"], "liked": False})
 
 if __name__ == '__main__':
-    # للعمل محلياً، بينما في Render سيقوم gunicorn بالتشغيل
     app.run(host='0.0.0.0', port=5000, debug=False)
