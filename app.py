@@ -11,7 +11,7 @@ ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'avi', 
 LIKE_FILE = 'likes.json'
 BUCKET_NAME = 'uploads'
 
-# إعداد Supabase باستخدام متغيرات البيئة (تعمل تلقائيًا في Render)
+# إعداد Supabase باستخدام متغيرات البيئة
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
@@ -91,41 +91,51 @@ HTML_TEMPLATE = '''
         }
 
         async function loadFeed() {
-            const res = await fetch('/files');
-            const filesData = await res.json();
-            const likesRes = await fetch('/likes');
-            const likes = await likesRes.json();
+            try {
+                const res = await fetch('/files');
+                const filesData = await res.json();
+                const likesRes = await fetch('/likes');
+                const likes = await likesRes.json();
 
-            const feed = document.getElementById('feed');
-            feed.innerHTML = '';
+                const feed = document.getElementById('feed');
+                feed.innerHTML = '';
 
-            filesData.forEach(fileObj => {
-                const fileName = fileObj.name;
-                const fileUrl = fileObj.url;
-                const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(fileName);
-                const slide = document.createElement('div');
-                slide.className = 'media-slide';
+                filesData.forEach(fileObj => {
+                    const fileName = fileObj.name;
+                    const fileUrl = fileObj.url;
+                    
+                    const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(fileName);
+                    const slide = document.createElement('div');
+                    slide.className = 'media-slide';
 
-                const likeInfo = likes[fileName] || {count: 0, users: []};
-                const isLiked = likeInfo.users.includes(username);
+                    const likeInfo = likes[fileName] || {count: 0, users: []};
+                    const isLiked = likeInfo.users.includes(username);
 
-                if (isVideo) {
-                    slide.innerHTML = `
-                        <video src="${fileUrl}" loop playsinline preload="metadata"></video>
-                        <div class="like-btn ${isLiked ? 'liked' : ''}" data-file="${fileName}" onclick="toggleLike(this)">
-                            ❤️ <span class="like-count">${likeInfo.count}</span>
-                        </div>
-                    `;
-                } else {
-                    slide.innerHTML = `
-                        <img src="${fileUrl}" alt="">
-                        <div class="like-btn ${isLiked ? 'liked' : ''}" data-file="${fileName}" onclick="toggleLike(this)">
-                            ❤️ <span class="like-count">${likeInfo.count}</span>
-                        </div>
-                    `;
-                }
-                feed.appendChild(slide);
-            });
+                    if (isVideo) {
+                        slide.innerHTML = `
+                            <video src="${fileUrl}" loop playsinline preload="metadata"></video>
+                            <div class="like-btn ${isLiked ? 'liked' : ''}" data-file="${fileName}" onclick="toggleLike(this)">
+                                ❤️ <span class="like-count">${likeInfo.count}</span>
+                            </div>
+                        `;
+                    } else {
+                        slide.innerHTML = `
+                            <img src="${fileUrl}" alt="Media">
+                            <div class="like-btn ${isLiked ? 'liked' : ''}" data-file="${fileName}" onclick="toggleLike(this)">
+                                ❤️ <span class="like-count">${likeInfo.count}</span>
+                            </div>
+                        `;
+                    }
+                    feed.appendChild(slide);
+                });
+                
+                // تشغيل أول فيديو تلقائياً إن وجد
+                const firstVideo = feed.querySelector('video');
+                if(firstVideo) firstVideo.play().catch(() => {});
+                
+            } catch (error) {
+                console.error("خطأ في جلب الملفات:", error);
+            }
         }
 
         async function toggleLike(btn) {
@@ -142,7 +152,7 @@ HTML_TEMPLATE = '''
             }
         }
 
-        // تشغيل الفيديو عند ظهوره في الشاشة
+        // تشغيل الفيديو عند ظهوره في الشاشة وإيقافه عند الخروج منها
         document.getElementById('feed').addEventListener('scroll', () => {
             document.querySelectorAll('video').forEach(video => {
                 const rect = video.getBoundingClientRect();
@@ -181,10 +191,12 @@ HTML_TEMPLATE = '''
             xhr.onload = () => {
                 progressContainer.style.display = 'none';
                 if (xhr.status === 200) {
-                    loadFeed();
+                    loadFeed(); // تحديث الواجهة فوراً بعد الرفع
                 } else {
                     alert("حدث خطأ أثناء الرفع، راجع السجلات");
                 }
+                // إعادة تعيين حقل الإدخال ليتمكن من رفع نفس الملف مرة أخرى إذا أراد
+                document.getElementById('file-input').value = ''; 
             };
 
             xhr.send(formData);
@@ -242,10 +254,16 @@ def get_files():
         valid_files.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
         file_list = []
+        
+        # إزالة الشرطة المائلة (/) من نهاية الرابط إن وجدت لتجنب الأخطاء
+        base_url = SUPABASE_URL.rstrip('/')
+        
         for f in valid_files:
             filename = f['name']
-            # استخراج الرابط العام المباشر وعرضه في الواجهة
-            public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
+            
+            # بناء الرابط العام يدوياً (أكثر استقراراً ويعمل على جميع إصدارات المكتبة)
+            public_url = f"{base_url}/storage/v1/object/public/{BUCKET_NAME}/{filename}"
+            
             file_list.append({
                 "name": filename,
                 "url": public_url
@@ -281,5 +299,5 @@ def like():
         return jsonify({"success": True, "count": likes_data[file]["count"], "liked": False})
 
 if __name__ == '__main__':
-    # يعمل محليًا بهذا الشكل، ولكن في Render سيقوم gunicorn بالتعامل مع app
+    # للعمل محلياً، بينما في Render سيقوم gunicorn بالتشغيل
     app.run(host='0.0.0.0', port=5000, debug=False)
