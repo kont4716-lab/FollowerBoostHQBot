@@ -1,1131 +1,1184 @@
-from flask import Flask, request, render_template_string, jsonify
 import os
-import uuid
+import re
+import logging
+from functools import wraps
+from flask import (
+    Flask, request, session, redirect, url_for,
+    jsonify, render_template_string, make_response
+)
+from werkzeug.security import generate_password_hash, check_password_hash
 from supabase import create_client, Client
 
+# =========================================================
+# Logging Configuration
+# =========================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger("TaskApp")
+
+# =========================================================
+# Flask & Supabase Initialization
+# =========================================================
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 جيجابايت حد أقصى للرفع
+app.secret_key = os.environ.get("SECRET_KEY", "super-secret-key-change-this-in-production")
 
-ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'avi', 'mkv', 'webm'}
-BUCKET_NAME = 'uploads'
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-# إعداد الربط مع Supabase
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    logger.warning("SUPABASE_URL or SUPABASE_KEY environment variables are missing!")
 
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-else:
-    supabase = None
-    print("تنبيه: لم يتم العثور على متغيرات بيئة Supabase.")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if (SUPABASE_URL and SUPABASE_KEY) else None
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+# =========================================================
+# Security & Helper Decorators
+# =========================================================
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        # Check if user is banned
+        res = supabase.table("accounts").select("is_banned").eq("id", session['user_id']).execute()
+        if res.data and res.data[0]['is_banned']:
+            session.clear()
+            return render_template_string(BASE_LAYOUT, title="مظور", content="""
+                <div class="card p-4 text-center border-danger">
+                    <h3 class="text-danger">تم حظر حسابك</h3>
+                    <p class="text-muted">لقد تم حظر حسابك لمخالفة الشروط والأحكام. تواصل مع الدعم الفني للمزيد.</p>
+                    <a href="/login" class="btn btn-primary">العودة لتسجيل الدخول</a>
+                </div>
+            """)
+        return f(*args, **kwargs)
+    return decorated_function
 
-# القالب الكامل (HTML + CSS + JavaScript)
-HTML_TEMPLATE = '''
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        if not session.get('is_admin', False):
+            return render_template_string(BASE_LAYOUT, title="غير مصرح", content="""
+                <div class="card p-4 text-center border-warning">
+                    <h3 class="text-warning">غير مصرح لك بالوصول</h3>
+                    <p class="text-muted">هذه الصفحة خاصة بمديري النظام فقط.</p>
+                    <a href="/dashboard" class="btn btn-primary">الرئيسية</a>
+                </div>
+            """), 403
+        return f(*args, **kwargs)
+    return decorated_function
+
+def get_current_user():
+    if 'user_id' in session:
+        res = supabase.table("accounts").select("*").eq("id", session['user_id']).execute()
+        if res.data:
+            return res.data[0]
+    return None
+
+def log_coin_transaction(user_id, amount, action, description):
+    """تسجيل أي حركة نقاط في القاعدة"""
+    supabase.table("coin_history").insert({
+        "user_id": user_id,
+        "amount": amount,
+        "action": action,
+        "description": description
+    }).execute()
+
+def create_notification(user_id, title, message):
+    """إرسال إشعار للمستخدم"""
+    supabase.table("notifications").insert({
+        "user_id": user_id,
+        "title": title,
+        "message": message
+    }).execute()
+
+# =========================================================
+# HTML Templates (Single-File Architecture)
+# =========================================================
+
+BASE_LAYOUT = """
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="ar" dir="rtl" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Boost Feed & Messages</title>
+    <title>{{ title }} - TaskCoins Hub</title>
+    <!-- Bootstrap 5 RTL CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.rtl.min.css">
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family:'Cairo',sans-serif; background:#000; color:white; overflow:hidden; height:100vh; }
-        
-        /* الشريط العلوي */
-        .header { 
-            position:fixed; top:0; left:0; right:0; 
-            background:rgba(0,0,0,0.85); padding:15px; 
-            text-align:center; z-index:100; font-size:20px; font-weight:700; 
-            display:flex; justify-content:center; align-items:center;
-            border-bottom:1px solid #222;
+        :root {
+            --bg-primary: #0f172a;
+            --bg-card: #1e293b;
+            --accent: #6366f1;
+            --accent-hover: #4f46e5;
         }
-        
-        .chat-btn-header {
-            position:absolute; left:15px; top:50%; transform:translateY(-50%);
-            background:#ff0050; color:white; border:none; padding:6px 14px;
-            border-radius:20px; font-size:13px; font-family:'Cairo', sans-serif;
-            font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:5px;
+        body {
+            background-color: var(--bg-primary);
+            color: #f8fafc;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
-
-        .unread-badge {
-            background:#fff; color:#ff0050; border-radius:50%;
-            padding:1px 6px; font-size:11px; font-weight:bold; display:none;
+        .card {
+            background-color: var(--bg-card);
+            border: 1px solid #334155;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
         }
-
-        /* خلاصة المنشورات (TikTok Feed) */
-        .tiktok-container { height:100vh; overflow-y:scroll; scroll-snap-type:y mandatory; scroll-behavior:smooth; }
-        .media-slide { height:100vh; scroll-snap-align:start; display:flex; align-items:center; justify-content:center; background:#111; position:relative; }
-        .media-slide video, .media-slide img { max-height:100%; max-width:100%; object-fit:contain; }
-        
-        /* شريط التفاعل الجانبي */
-        .action-bar {
-            position:absolute; bottom:80px; right:20px; 
-            display:flex; flex-direction:column; gap:18px; 
-            align-items:center; z-index:10;
+        .navbar {
+            background-color: var(--bg-card);
+            border-bottom: 1px solid #334155;
         }
-        .action-btn {
-            background:rgba(0,0,0,0.7); 
-            width:60px; height:60px; border-radius:50%; 
-            display:flex; flex-direction:column; align-items:center; 
-            justify-content:center; font-size:26px; cursor:pointer; 
-            transition:0.3s; color:white; border:none;
+        .btn-primary {
+            background-color: var(--accent);
+            border-color: var(--accent);
         }
-        .like-btn.liked { color:#ff0050; transform:scale(1.15); }
-        .action-count { font-size:12px; margin-top:2px; font-weight:600; }
-
-        .upload-btn {
-            position:fixed; bottom:25px; left:50%; transform:translateX(-50%);
-            background:#ff0050; color:white; border:none; padding:12px 30px; 
-            border-radius:50px; font-size:16px; font-weight:700; z-index:200; cursor:pointer;
-            box-shadow: 0 4px 15px rgba(255, 0, 80, 0.4);
+        .btn-primary:hover {
+            background-color: var(--accent-hover);
+            border-color: var(--accent-hover);
         }
-        #progress-container { 
-            position:fixed; bottom:90px; left:50%; transform:translateX(-50%);
-            background:rgba(0,0,0,0.9); padding:12px 25px; border-radius:30px; display:none; z-index:300;
+        .coin-badge {
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            color: #fff;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: bold;
         }
-
-        /* نافذة التعليقات المنزلقة */
-        .comments-modal {
-            position:fixed; bottom:-100%; left:0; right:0;
-            height:55vh; background:#181818; border-top-left-radius:20px; border-top-right-radius:20px;
-            z-index:500; transition:bottom 0.3s ease-in-out; display:flex; flex-direction:column;
-            box-shadow:0 -5px 25px rgba(0,0,0,0.8);
+        .nav-link {
+            color: #94a3b8;
         }
-        .comments-modal.active { bottom:0; }
-        .comments-header {
-            padding:15px; text-align:center; font-weight:bold; border-bottom:1px solid #333; position:relative;
+        .nav-link:hover, .nav-link.active {
+            color: #ffffff;
         }
-        .close-comments {
-            position:absolute; left:15px; top:12px; cursor:pointer; font-size:20px; color:#888;
-        }
-        .comments-list { flex:1; overflow-y:auto; padding:15px; }
-        .comment-item { margin-bottom:12px; background:#222; padding:10px 14px; border-radius:12px; }
-        .comment-user { font-size:12px; color:#ff0050; font-weight:bold; margin-bottom:3px; }
-        .comment-text { font-size:14px; word-break:break-word; color:#eee; }
-        .comment-input-area { display:flex; padding:10px 15px; border-top:1px solid #333; background:#111; }
-        .comment-input {
-            flex:1; background:#222; border:1px solid #444; color:white;
-            padding:10px 15px; border-radius:25px; outline:none; font-family:'Cairo', sans-serif;
-        }
-        .send-comment-btn {
-            background:#ff0050; color:white; border:none; padding:0 18px;
-            margin-right:8px; border-radius:25px; font-weight:bold; cursor:pointer;
-        }
-
-        /* نافذة الرسائل الخاصة الاحترافية */
-        .messaging-modal {
-            position:fixed; bottom:-100%; left:0; right:0;
-            height:85vh; background:#181818; border-top-left-radius:20px; border-top-right-radius:20px;
-            z-index:600; transition:bottom 0.3s ease-in-out; display:flex; flex-direction:column;
-            box-shadow:0 -5px 25px rgba(0,0,0,0.8);
-        }
-        .messaging-modal.active { bottom:0; }
-        
-        .messaging-header {
-            padding:15px; text-align:center; font-weight:bold; border-bottom:1px solid #333; 
-            position:relative; display:flex; align-items:center; justify-content:center;
-        }
-        .close-messaging { position:absolute; left:15px; cursor:pointer; font-size:18px; color:#888; }
-        .back-messaging { position:absolute; right:15px; cursor:pointer; font-size:18px; color:#888; display:none; }
-
-        .search-area { padding:12px 15px; border-bottom:1px solid #222; }
-        .search-input {
-            width:100%; background:#222; border:1px solid #444; color:white;
-            padding:10px 15px; border-radius:20px; outline:none; font-family:'Cairo', sans-serif;
-        }
-
-        .user-list { flex:1; overflow-y:auto; padding:10px 15px; }
-        .user-item, .conv-item {
-            display:flex; align-items:center; justify-content:space-between;
-            padding:12px 15px; background:#222; border-radius:12px; margin-bottom:8px; cursor:pointer; transition:0.2s;
-        }
-        .user-item:hover, .conv-item:hover { background:#2a2a2a; }
-        .user-item-name { font-weight:bold; color:#fff; }
-        .user-item-action { font-size:12px; color:#ff0050; font-weight:bold; }
-        .conv-last-msg { font-size:12px; color:#aaa; margin-top:3px; }
-
-        .chat-view { display:none; flex-direction:column; flex:1; overflow:hidden; }
-        .chat-messages { flex:1; overflow-y:auto; padding:15px; display:flex; flex-direction:column; gap:10px; }
-        
-        .msg-bubble {
-            max-width:75%; padding:10px 14px; border-radius:16px; font-size:14px; word-break:break-word; line-height:1.4;
-        }
-        .msg-sent {
-            align-self:flex-start; background:#ff0050; color:white; border-bottom-right-radius:4px;
-        }
-        .msg-received {
-            align-self:flex-end; background:#2c2c2e; color:white; border-bottom-left-radius:4px;
-        }
-
-        .chat-input-area {
-            display:flex; padding:10px 15px; border-top:1px solid #333; background:#111;
-        }
-        .chat-input {
-            flex:1; background:#222; border:1px solid #444; color:white;
-            padding:10px 15px; border-radius:25px; outline:none; font-family:'Cairo', sans-serif;
-        }
-        .send-msg-btn {
-            background:#ff0050; color:white; border:none; padding:0 18px;
-            margin-right:8px; border-radius:25px; font-weight:bold; cursor:pointer;
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 1060;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <span>FollowerBoost Feed</span>
-        <button class="chat-btn-header" onclick="openMessagingModal()">
-            💬 الرسائل <span id="global-unread-badge" class="unread-badge">0</span>
-        </button>
-    </div>
-    
-    <div class="tiktok-container" id="feed"></div>
 
-    <button class="upload-btn" onclick="document.getElementById('file-input').click()">📤 رفع</button>
-    <input type="file" id="file-input" accept="image/*,video/*" style="display:none;">
-
-    <div id="progress-container">
-        <div style="margin-bottom:8px;">جاري الرفع... <span id="percent">0%</span></div>
-        <div style="height:8px; background:#333; border-radius:10px; width:300px; overflow:hidden;">
-            <div id="progress" style="height:100%; width:0%; background:#ff0050; transition:width 0.3s;"></div>
-        </div>
-    </div>
-
-    <!-- نافذة التعليقات -->
-    <div class="comments-modal" id="comments-modal">
-        <div class="comments-header">
-            <span>التعليقات</span>
-            <span class="close-comments" onclick="closeComments()">✕</span>
-        </div>
-        <div class="comments-list" id="comments-list"></div>
-        <div class="comment-input-area">
-            <input type="text" id="comment-input" class="comment-input" placeholder="اكتب تعليقاً..." onkeypress="if(event.key==='Enter') sendComment()">
-            <button class="send-comment-btn" onclick="sendComment()">إرسال</button>
-        </div>
-    </div>
-
-    <!-- نافذة الرسائل الخاصة -->
-    <div class="messaging-modal" id="messaging-modal">
-        <div class="messaging-header">
-            <span class="back-messaging" id="back-messaging-btn" onclick="backToUserSearch()">➔</span>
-            <span id="messaging-title">المحادثات الخاصة</span>
-            <span class="close-messaging" onclick="closeMessagingModal()">✕</span>
-        </div>
-
-        <div id="search-view" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
-            <div class="search-area">
-                <input type="text" id="user-search-input" class="search-input" placeholder="ابحث عن اسم مستخدم..." oninput="handleUserSearch()">
+    <!-- Dynamic Navbar -->
+    <nav class="navbar navbar-expand-lg sticky-top">
+        <div class="container">
+            <a class="navbar-brand fw-bold text-primary" href="/dashboard">
+                <i class="fa-solid fa-coins me-2"></i>TaskCoins
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                {% if session.get('user_id') %}
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                    <li class="nav-item"><a class="nav-link" href="/dashboard"><i class="fa-solid fa-house me-1"></i> الرئيسية</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/tasks/create"><i class="fa-solid fa-plus-circle me-1"></i> إضافة مهمة</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/my-tasks"><i class="fa-solid fa-list-check me-1"></i> مهامي</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/history"><i class="fa-solid fa-history me-1"></i> السجل</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/notifications"><i class="fa-solid fa-bell me-1"></i> الإشعارات</a></li>
+                    {% if session.get('is_admin') %}
+                    <li class="nav-item"><a class="nav-link text-warning" href="/admin"><i class="fa-solid fa-user-shield me-1"></i> لوحة الإدارة</a></li>
+                    {% endif %}
+                </ul>
+                <div class="d-flex align-items-center gap-3">
+                    <span class="coin-badge">
+                        <i class="fa-solid fa-coins me-1"></i><span id="user-coins-display">{{ user_coins if user_coins is not none else 0 }}</span>
+                    </span>
+                    <div class="dropdown">
+                        <a href="#" class="d-flex align-items-center text-white text-decoration-none dropdown-toggle" data-bs-toggle="dropdown">
+                            <img src="{{ profile_photo or 'https://via.placeholder.com/150' }}" width="32" height="32" class="rounded-circle me-2">
+                            <strong>{{ username }}</strong>
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-dark text-small shadow">
+                            <li><a class="dropdown-item" href="/profile"><i class="fa-solid fa-user me-2"></i> الملف الشخصي</a></li>
+                            <li><a class="dropdown-item" href="/report"><i class="fa-solid fa-flag me-2"></i> تقديم بلاغ</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item text-danger" href="/logout"><i class="fa-solid fa-right-from-bracket me-2"></i> تسجيل الخروج</a></li>
+                        </ul>
+                    </div>
+                </div>
+                {% else %}
+                <div class="ms-auto">
+                    <a href="/login" class="btn btn-outline-light me-2">تسجيل الدخول</a>
+                    <a href="/register" class="btn btn-primary">إنشاء حساب</a>
+                </div>
+                {% endif %}
             </div>
-            <div class="user-list" id="user-results-list"></div>
+        </div>
+    </nav>
+
+    <!-- Main Content Container -->
+    <main class="container my-4 flex-grow-1">
+        <div id="alert-zone"></div>
+        {{ content | safe }}
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer mt-auto py-3 bg-dark text-center text-muted border-top border-secondary">
+        <div class="container">
+            <small>&copy; 2026 TaskCoins Hub - جميع الحقوق محفوظة.</small>
+        </div>
+    </footer>
+
+    <!-- Bootstrap JS + Popper -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Custom Application AJAX Scripts -->
+    <script>
+        // System Alert Helper
+        function showAlert(message, type = 'success') {
+            const alertZone = document.getElementById('alert-zone');
+            const alertHtml = `
+                <div class="alert alert-${type} alert-dismissible fade show" role="alert">
+                    ${message}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            `;
+            alertZone.innerHTML = alertHtml;
+            setTimeout(() => { alertZone.innerHTML = ''; }, 5000);
+        }
+
+        // Global AJAX Executor
+        async function apiCall(url, method = 'GET', data = null) {
+            try {
+                const options = {
+                    method: method,
+                    headers: { 'Content-Type': 'application/json' }
+                };
+                if (data) options.body = JSON.stringify(data);
+                
+                const response = await fetch(url, options);
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(result.error || 'حدث خطأ غير متوقع');
+                }
+                return result;
+            } catch (err) {
+                showAlert(err.message, 'danger');
+                return null;
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+# =========================================================
+# Authentication Routes
+# =========================================================
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'GET':
+        content = """
+        <div class="row justify-content-center">
+            <div class="col-md-5">
+                <div class="card p-4">
+                    <h3 class="text-center mb-4"><i class="fa-solid fa-user-plus text-primary me-2"></i>إنشاء حساب جديد</h3>
+                    <form id="register-form">
+                        <div class="mb-3">
+                            <label class="form-label">اسم المستخدم</label>
+                            <input type="text" id="username" class="form-control" required placeholder="مثال: ahmed123">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">البريد الإلكتروني</label>
+                            <input type="email" id="email" class="form-control" required placeholder="user@domain.com">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">كلمة المرور</label>
+                            <input type="password" id="password" class="form-control" required placeholder="******">
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 mb-3">تسجيل الحساب</button>
+                    </form>
+                    <div class="text-center">
+                        <small>لديك حساب بالفعل؟ <a href="/login">تسجيل الدخول</a></small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <script>
+            document.getElementById('register-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const username = document.getElementById('username').value.trim();
+                const email = document.getElementById('email').value.trim();
+                const password = document.getElementById('password').value;
+
+                const res = await apiCall('/api/auth/register', 'POST', { username, email, password });
+                if(res && res.success) {
+                    showAlert('تم إنشاء الحساب بنجاح! جاري تحويلك...', 'success');
+                    setTimeout(() => window.location.href = '/dashboard', 1500);
+                }
+            });
+        </script>
+        """
+        return render_template_string(BASE_LAYOUT, title="تسجيل حساب", content=content)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'GET':
+        content = """
+        <div class="row justify-content-center">
+            <div class="col-md-5">
+                <div class="card p-4">
+                    <h3 class="text-center mb-4"><i class="fa-solid fa-right-to-bracket text-primary me-2"></i>تسجيل الدخول</h3>
+                    <form id="login-form">
+                        <div class="mb-3">
+                            <label class="form-label">اسم المستخدم أو البريد</label>
+                            <input type="text" id="identity" class="form-control" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">كلمة المرور</label>
+                            <input type="password" id="password" class="form-control" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 mb-3">دخول</button>
+                    </form>
+                    <div class="text-center">
+                        <small>ليس لديك حساب؟ <a href="/register">إنشاء حساب</a></small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <script>
+            document.getElementById('login-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const identity = document.getElementById('identity').value.trim();
+                const password = document.getElementById('password').value;
+
+                const res = await apiCall('/api/auth/login', 'POST', { identity, password });
+                if(res && res.success) {
+                    window.location.href = '/dashboard';
+                }
+            });
+        </script>
+        """
+        return render_template_string(BASE_LAYOUT, title="تسجيل الدخول", content=content)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+# =========================================================
+# Main User Dashboard & App Pages
+# =========================================================
+
+@app.route('/')
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    user = get_current_user()
+    content = f"""
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <h2>مرحباً بك، {user['username']}! 👋</h2>
+            <p class="text-muted">قم بإكمال المهام المتاحة لجمع النقاط، أو أنشئ مهامك الخاصة لزيادة المتابعين والتفاعلات.</p>
+        </div>
+        <div class="col-md-4 text-start">
+            <div class="card p-3 bg-primary bg-gradient text-white">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="mb-0">رصيد النقاط الحالي</h6>
+                        <h2 class="fw-bold mb-0">{user['coins']}</h2>
+                    </div>
+                    <i class="fa-solid fa-coins fa-2x opacity-75"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters & Search -->
+    <div class="card p-3 mb-4">
+        <div class="row g-3">
+            <div class="col-md-6">
+                <input type="text" id="search-input" class="form-control" placeholder="بحث عن مهمة...">
+            </div>
+            <div class="col-md-4">
+                <select id="platform-filter" class="form-select">
+                    <option value="">جميع المنصات</option>
+                    <option value="YouTube">YouTube</option>
+                    <option value="Facebook">Facebook</option>
+                    <option value="TikTok">TikTok</option>
+                    <option value="Instagram">Instagram</option>
+                    <option value="X">X (Twitter)</option>
+                    <option value="Other">منصات أخرى</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button onclick="loadTasks()" class="btn btn-primary w-100"><i class="fa-solid fa-filter me-1"></i>تصفية</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Available Tasks Grid -->
+    <h4 class="mb-3"><i class="fa-solid fa-tasks me-2"></i>المهام المتاحة</h4>
+    <div class="row" id="tasks-container">
+        <!-- JS injected content -->
+    </div>
+
+    <script>
+        async function loadTasks() {{
+            const search = document.getElementById('search-input').value;
+            const platform = document.getElementById('platform-filter').value;
+            const queryParams = new URLSearchParams({{ search, platform }}).toString();
+            
+            const container = document.getElementById('tasks-container');
+            container.innerHTML = '<div class="text-center my-5"><div class="spinner-border text-primary"></div></div>';
+
+            const tasks = await apiCall('/api/tasks?' + queryParams, 'GET');
+            if(!tasks) return;
+
+            if(tasks.length === 0) {{
+                container.innerHTML = '<div class="col-12 text-center my-5 text-muted">لا توجد مهام متاحة حالياً.</div>';
+                return;
+            }}
+
+            container.innerHTML = tasks.map(t => `
+                <div class="col-md-4 mb-4">
+                    <div class="card h-100">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="badge bg-secondary">${{t.platform}}</span>
+                                <span class="badge bg-warning text-dark"><i class="fa-solid fa-coins me-1"></i>+${{t.reward}}</span>
+                            </div>
+                            <h5 class="card-title">${{t.task_type}}</h5>
+                            <p class="card-text text-truncate"><a href="${{t.target_url}}" target="_blank" class="text-info">${{t.target_url}}</a></p>
+                            <div class="progress mb-3" style="height: 10px;">
+                                <div class="progress-bar bg-success" style="width: ${(t.completed_count / t.required_count) * 100}%"></div>
+                            </div>
+                            <small class="text-muted d-block mb-3">المكتمل: ${{t.completed_count}} من ${{t.required_count}}</small>
+                            <button onclick="executeTask(${{t.id}}, '${{t.target_url}}')" class="btn btn-outline-primary w-100">
+                                <i class="fa-solid fa-external-link me-1"></i>تنفيذ المهمة
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }}
+
+        async function executeTask(taskId, targetUrl) {{
+            // Open target in new tab first
+            window.open(targetUrl, '_blank');
+            
+            // Send claim points request
+            const res = await apiCall(`/api/tasks/${{taskId}}/complete`, 'POST');
+            if(res && res.success) {{
+                showAlert(`تم إكمال المهمة بنجاح! حصلت على ${res.reward} نقطة.`, 'success');
+                document.getElementById('user-coins-display').innerText = res.new_balance;
+                loadTasks();
+            }}
+        }}
+
+        // Initial Load
+        loadTasks();
+    </script>
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="الرئيسية", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
+
+@app.route('/tasks/create', methods=['GET'])
+@login_required
+def create_task_page():
+    user = get_current_user()
+    content = """
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card p-4">
+                <h3 class="mb-4"><i class="fa-solid fa-plus-circle text-primary me-2"></i>إنشاء مهمة جديدة</h3>
+                <form id="create-task-form">
+                    <div class="mb-3">
+                        <label class="form-label">المنصة</label>
+                        <select id="platform" class="form-select" required>
+                            <option value="YouTube">YouTube</option>
+                            <option value="Facebook">Facebook</option>
+                            <option value="TikTok">TikTok</option>
+                            <option value="Instagram">Instagram</option>
+                            <option value="X">X (Twitter)</option>
+                            <option value="Other">منصة أخرى</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">نوع المهمة</label>
+                        <input type="text" id="task_type" class="form-control" placeholder="مثال: اشتراك بالقناة، إعجاب بالفيديو..." required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">الرابط المستهدف</label>
+                        <input type="url" id="target_url" class="form-control" placeholder="https://..." required>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">المكافأة لكل شخص (نقاط)</label>
+                            <input type="number" id="reward" class="form-control" min="1" value="5" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">العدد المطلوب</label>
+                            <input type="number" id="required_count" class="form-control" min="1" value="10" required>
+                        </div>
+                    </div>
+                    <div class="alert alert-info">
+                        <strong>التكلفة الإجمالية: </strong><span id="total-cost">50</span> نقطة.
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">نشر المهمة خصماً من الرصيد</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <script>
+        const rewardInput = document.getElementById('reward');
+        const countInput = document.getElementById('required_count');
+        const totalCostSpan = document.getElementById('total-cost');
+
+        function updateTotal() {
+            const reward = parseInt(rewardInput.value) || 0;
+            const count = parseInt(countInput.value) || 0;
+            totalCostSpan.innerText = reward * count;
+        }
+
+        rewardInput.addEventListener('input', updateTotal);
+        countInput.addEventListener('input', updateTotal);
+
+        document.getElementById('create-task-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const data = {
+                platform: document.getElementById('platform').value,
+                task_type: document.getElementById('task_type').value.trim(),
+                target_url: document.getElementById('target_url').value.trim(),
+                reward: parseInt(rewardInput.value),
+                required_count: parseInt(countInput.value)
+            };
+
+            const res = await apiCall('/api/tasks', 'POST', data);
+            if(res && res.success) {
+                showAlert('تم إضافة المهمة وخصم النقاط بنجاح!', 'success');
+                setTimeout(() => window.location.href = '/my-tasks', 1500);
+            }
+        });
+    </script>
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="إضافة مهمة", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
+
+@app.route('/my-tasks')
+@login_required
+def my_tasks_page():
+    user = get_current_user()
+    content = """
+    <h3 class="mb-4"><i class="fa-solid fa-list-check me-2"></i>إدارة مهامي</h3>
+    <div class="table-responsive">
+        <table class="table table-dark table-striped align-middle">
+            <thead>
+                <tr>
+                    <th>المنصة</th>
+                    <th>النوع</th>
+                    <th>الرابط</th>
+                    <th>المكافأة</th>
+                    <th>الإنجاز</th>
+                    <th>الحالة</th>
+                    <th>الإجراءات</th>
+                </tr>
+            </thead>
+            <tbody id="my-tasks-table">
+                <!-- JS populated -->
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        async function loadMyTasks() {
+            const tasks = await apiCall('/api/my-tasks', 'GET');
+            const tbody = document.getElementById('my-tasks-table');
+            if(!tasks) return;
+
+            if(tasks.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لم تقم بإنشاء أي مهام بعد.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = tasks.map(t => `
+                <tr>
+                    <td><span class="badge bg-secondary">${t.platform}</span></td>
+                    <td>${t.task_type}</td>
+                    <td><a href="${t.target_url}" target="_blank" class="text-info">رابط</a></td>
+                    <td>${t.reward}</td>
+                    <td>${t.completed_count} / ${t.required_count}</td>
+                    <td><span class="badge bg-${t.status === 'active' ? 'success' : 'danger'}">${t.status}</span></td>
+                    <td>
+                        <button onclick="deleteTask(${t.id})" class="btn btn-sm btn-outline-danger"><i class="fa-solid fa-trash"></i></button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        async function deleteTask(id) {
+            if(!confirm('هل أنت تأكد من إيقاف/حذف هذه المهمة؟')) return;
+            const res = await apiCall(`/api/tasks/${id}`, 'DELETE');
+            if(res && res.success) {
+                showAlert('تم حذف المهمة بنجاح.', 'success');
+                loadMyTasks();
+            }
+        }
+
+        loadMyTasks();
+    </script>
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="مهامي", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
+
+@app.route('/history')
+@login_required
+def history_page():
+    user = get_current_user()
+    content = """
+    <h3 class="mb-4"><i class="fa-solid fa-history me-2"></i>سجل المعاملات والنقاط</h3>
+    <div class="card p-3">
+        <div class="table-responsive">
+            <table class="table table-dark align-middle">
+                <thead>
+                    <tr>
+                        <th>التاريخ</th>
+                        <th>العملية</th>
+                        <th>المبلغ</th>
+                        <th>الوصف</th>
+                    </tr>
+                </thead>
+                <tbody id="history-table"></tbody>
+            </table>
+        </div>
+    </div>
+    <script>
+        async function loadHistory() {
+            const data = await apiCall('/api/user/history', 'GET');
+            const tbody = document.getElementById('history-table');
+            if(!data) return;
+
+            if(data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">لا يوجد سجل معاملات حتى الآن.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = data.map(h => `
+                <tr>
+                    <td>${new Date(h.created_at).toLocaleString('ar')}</td>
+                    <td><span class="badge bg-${h.amount >= 0 ? 'success' : 'danger'}">${h.action}</span></td>
+                    <td class="${h.amount >= 0 ? 'text-success' : 'text-danger'} fw-bold">${h.amount > 0 ? '+' : ''}${h.amount}</td>
+                    <td>${h.description || '-'}</td>
+                </tr>
+            `).join('');
+        }
+        loadHistory();
+    </script>
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="السجل", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
+
+@app.route('/notifications')
+@login_required
+def notifications_page():
+    user = get_current_user()
+    content = """
+    <h3 class="mb-4"><i class="fa-solid fa-bell me-2"></i>الإشعارات</h3>
+    <div class="row justify-content-center">
+        <div class="col-md-10" id="notifications-list"></div>
+    </div>
+    <script>
+        async function loadNotifications() {
+            const data = await apiCall('/api/user/notifications', 'GET');
+            const list = document.getElementById('notifications-list');
+            if(!data) return;
+
+            if(data.length === 0) {
+                list.innerHTML = '<div class="text-center text-muted card p-4">لا توجد إشعارات جديدة.</div>';
+                return;
+            }
+
+            list.innerHTML = data.map(n => `
+                <div class="card p-3 mb-3 border-start border-4 border-info">
+                    <div class="d-flex justify-content-between">
+                        <h5 class="mb-1">${n.title}</h5>
+                        <small class="text-muted">${new Date(n.created_at).toLocaleString('ar')}</small>
+                    </div>
+                    <p class="mb-0 text-slate-300">${n.message}</p>
+                </div>
+            `).join('');
+        }
+        loadNotifications();
+    </script>
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="الإشعارات", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
+
+@app.route('/profile', methods=['GET'])
+@login_required
+def profile_page():
+    user = get_current_user()
+    content = f"""
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card p-4 mb-4">
+                <h4 class="mb-3"><i class="fa-solid fa-user-gear me-2"></i>الملف الشخصي</h4>
+                <form id="profile-form">
+                    <div class="mb-3 text-center">
+                        <img src="{user['profile_photo']}" width="100" height="100" class="rounded-circle mb-2">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">اسم المستخدم</label>
+                        <input type="text" class="form-control" value="{user['username']}" disabled>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">البريد الإلكتروني</label>
+                        <input type="email" id="email" class="form-control" value="{user['email']}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">رابط الصورة الشخصية</label>
+                        <input type="url" id="profile_photo" class="form-control" value="{user['profile_photo']}">
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">حفظ التغييرات</button>
+                </form>
+            </div>
+
+            <div class="card p-4">
+                <h4 class="mb-3"><i class="fa-solid fa-key me-2"></i>تغيير كلمة المرور</h4>
+                <form id="password-form">
+                    <div class="mb-3">
+                        <label class="form-label">كلمة المرور الحالية</label>
+                        <input type="password" id="current_password" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">كلمة المرور الجديدة</label>
+                        <input type="password" id="new_password" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-warning w-100">تحديث كلمة المرور</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <script>
+        document.getElementById('profile-form').addEventListener('submit', async (e) => {{
+            e.preventDefault();
+            const res = await apiCall('/api/user/profile', 'PUT', {{
+                email: document.getElementById('email').value,
+                profile_photo: document.getElementById('profile_photo').value
+            }});
+            if(res && res.success) showAlert('تم تحديث البيانات بنجاح', 'success');
+        }});
+
+        document.getElementById('password-form').addEventListener('submit', async (e) => {{
+            e.preventDefault();
+            const res = await apiCall('/api/user/password', 'PUT', {{
+                current_password: document.getElementById('current_password').value,
+                new_password: document.getElementById('new_password').value
+            }});
+            if(res && res.success) showAlert('تم تغيير كلمة المرور بنجاح', 'success');
+        }});
+    </script>
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="الملف الشخصي", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
+
+@app.route('/report', methods=['GET'])
+@login_required
+def report_page():
+    user = get_current_user()
+    content = """
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card p-4">
+                <h4 class="mb-3"><i class="fa-solid fa-flag text-danger me-2"></i>تقديم بلاغ أو شكوى</h4>
+                <form id="report-form">
+                    <div class="mb-3">
+                        <label class="form-label">معرف/اسم المستخدم المبلغ عنه (اختياري)</label>
+                        <input type="text" id="reported_user" class="form-control" placeholder="اسم المستخدم أو اتركه فارغاً">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">سبب البلاغ / تفاصيل المشكلة</label>
+                        <textarea id="reason" class="form-control" rows="4" required></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-danger w-100">إرسال البلاغ</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <script>
+        document.getElementById('report-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const res = await apiCall('/api/reports', 'POST', {
+                reported_user: document.getElementById('reported_user').value.trim(),
+                reason: document.getElementById('reason').value.trim()
+            });
+            if(res && res.success) {
+                showAlert('تم تقديم البلاغ بنجاح وسوف تقوم الإدارة بمراجعته.', 'success');
+                document.getElementById('report-form').reset();
+            }
+        });
+    </script>
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="تقديم بلاغ", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
+
+# =========================================================
+# Admin Panel Route
+# =========================================================
+
+@app.route('/admin')
+@admin_required
+def admin_panel():
+    user = get_current_user()
+    content = """
+    <h2 class="mb-4 text-warning"><i class="fa-solid fa-user-shield me-2"></i>لوحة التحكم الإدارية</h2>
+
+    <!-- System Stats -->
+    <div class="row mb-4" id="stats-zone">
+        <div class="col-md-3"><div class="card p-3 text-center"><h5>المستخدمين</h5><h3 id="stat-users">-</h3></div></div>
+        <div class="col-md-3"><div class="card p-3 text-center"><h5>المهام النشطة</h5><h3 id="stat-tasks">-</h3></div></div>
+        <div class="col-md-3"><div class="card p-3 text-center"><h5>إجمالي النقاط</h5><h3 id="stat-coins">-</h3></div></div>
+        <div class="col-md-3"><div class="card p-3 text-center"><h5>البلاغات</h5><h3 id="stat-reports">-</h3></div></div>
+    </div>
+
+    <!-- Admin Tabs -->
+    <ul class="nav nav-tabs mb-3" id="adminTabs">
+        <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#users-tab">المستخدمين</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#reports-tab">البلاغات</a></li>
+    </ul>
+
+    <div class="tab-content">
+        <!-- Users Management Tab -->
+        <div class="tab-pane fade show active" id="users-tab">
+            <div class="card p-3">
+                <div class="table-responsive">
+                    <table class="table table-dark align-middle">
+                        <thead>
+                            <tr>
+                                <th>المعرف</th>
+                                <th>اسم المستخدم</th>
+                                <th>البريد</th>
+                                <th>النقاط</th>
+                                <th>الحالة</th>
+                                <th>الإجراءات</th>
+                            </tr>
+                        </thead>
+                        <tbody id="admin-users-table"></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
-        <div class="chat-view" id="chat-view">
-            <div class="chat-messages" id="chat-messages"></div>
-            <div class="chat-input-area">
-                <input type="text" id="chat-input" class="chat-input" placeholder="اكتب رسالة..." onkeypress="if(event.key==='Enter') sendChatMessage()">
-                <button class="send-msg-btn" onclick="sendChatMessage()">إرسال</button>
+        <!-- Reports Tab -->
+        <div class="tab-pane fade" id="reports-tab">
+            <div class="card p-3">
+                <div class="table-responsive">
+                    <table class="table table-dark align-middle">
+                        <thead>
+                            <tr>
+                                <th>المُبلّغ</th>
+                                <th>السبب</th>
+                                <th>التاريخ</th>
+                                <th>الحالة</th>
+                            </tr>
+                        </thead>
+                        <tbody id="admin-reports-table"></tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        let currentPostId = null;
-        let postsCache = {};
-        
-        let activeConversationId = null;
-        let activeTargetUsername = null;
-        let chatPollInterval = null;
-        let globalUnreadInterval = null;
+        async function loadAdminData() {
+            const data = await apiCall('/api/admin/overview', 'GET');
+            if(!data) return;
 
-        async function initUser() {
-            let username = localStorage.getItem('username');
-            
-            if (username) {
-                const res = await fetch('/verify_user', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username: username})
-                });
-                const data = await res.json();
-                if (!data.exists) {
-                    username = null;
-                    localStorage.removeItem('username');
-                }
-            }
+            document.getElementById('stat-users').innerText = data.stats.total_users;
+            document.getElementById('stat-tasks').innerText = data.stats.active_tasks;
+            document.getElementById('stat-coins').innerText = data.stats.total_coins;
+            document.getElementById('stat-reports').innerText = data.stats.pending_reports;
 
-            while (!username) {
-                username = prompt("أدخل اسم مستخدم جديد لإنشاء حسابك:");
-                if (!username || !username.trim()) continue;
-                username = username.trim();
+            // Render Users Table
+            document.getElementById('admin-users-table').innerHTML = data.users.map(u => `
+                <tr>
+                    <td>${u.id}</td>
+                    <td>${u.username}</td>
+                    <td>${u.email}</td>
+                    <td>${u.coins}</td>
+                    <td><span class="badge bg-${u.is_banned ? 'danger' : 'success'}">${u.is_banned ? 'محظور' : 'نشط'}</span></td>
+                    <td>
+                        <button onclick="toggleBan(${u.id}, ${!u.is_banned})" class="btn btn-sm btn-${u.is_banned ? 'success' : 'warning'}">
+                            ${u.is_banned ? 'إلغاء الحظر' : 'حظر'}
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
 
-                const res = await fetch('/register', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username: username})
-                });
-                const data = await res.json();
+            // Render Reports
+            document.getElementById('admin-reports-table').innerHTML = data.reports.map(r => `
+                <tr>
+                    <td>${r.reporter_id}</td>
+                    <td>${r.reason}</td>
+                    <td>${new Date(r.created_at).toLocaleDateString('ar')}</td>
+                    <td><span class="badge bg-info">${r.status}</span></td>
+                </tr>
+            `).join('');
+        }
 
-                if (data.success) {
-                    localStorage.setItem('username', username);
-                    alert("تم تسجيل حسابك بنجاح!");
-                } else {
-                    alert(data.message || "اسم المستخدم مستخدم بالفعل، اختر اسماً آخر.");
-                    username = null;
-                }
+        async function toggleBan(userId, banState) {
+            const res = await apiCall(`/api/admin/users/${userId}/ban`, 'POST', { ban: banState });
+            if(res && res.success) {
+                showAlert('تم تحديث حالة المستخدم بنجاح', 'success');
+                loadAdminData();
             }
         }
 
-        async function loadFeed() {
-            try {
-                const res = await fetch('/feed');
-                const posts = await res.json();
-                const username = localStorage.getItem('username');
-
-                const feed = document.getElementById('feed');
-                feed.innerHTML = '';
-                postsCache = {};
-
-                posts.forEach(post => {
-                    postsCache[post.id] = post;
-                    const isVideo = /\.(mp4|mov|webm|avi|mkv)$/i.test(post.media_url);
-                    const slide = document.createElement('div');
-                    slide.className = 'media-slide';
-
-                    const isLiked = post.liked_users.includes(username);
-
-                    const actionHtml = `
-                        <div class="action-bar">
-                            <button class="action-btn like-btn ${isLiked ? 'liked' : ''}" onclick="toggleLike('${post.id}', this)">
-                                ❤️ <span class="action-count">${post.likes_count}</span>
-                            </button>
-                            <button class="action-btn" onclick="openComments('${post.id}')">
-                                💬 <span class="action-count" id="comment-count-${post.id}">${post.comments.length}</span>
-                            </button>
-                        </div>
-                    `;
-
-                    if (isVideo) {
-                        slide.innerHTML = `
-                            <video src="${post.media_url}" loop playsinline preload="metadata"></video>
-                            ${actionHtml}
-                        `;
-                    } else {
-                        slide.innerHTML = `
-                            <img src="${post.media_url}" alt="Media">
-                            ${actionHtml}
-                        `;
-                    }
-                    feed.appendChild(slide);
-                });
-                
-                const firstVideo = feed.querySelector('video');
-                if(firstVideo) firstVideo.play().catch(() => {});
-                
-            } catch (error) {
-                console.error("خطأ في تحميل المنشورات:", error);
-            }
-        }
-
-        async function toggleLike(postId, btn) {
-            const username = localStorage.getItem('username');
-            const res = await fetch('/like', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({post_id: postId, username: username})
-            });
-            const data = await res.json();
-            if (data.success) {
-                btn.classList.toggle('liked', data.liked);
-                btn.querySelector('.action-count').textContent = data.count;
-            }
-        }
-
-        function openComments(postId) {
-            currentPostId = postId;
-            const post = postsCache[postId];
-            if (!post) return;
-
-            renderCommentsList(post.comments || []);
-            document.getElementById('comments-modal').classList.add('active');
-        }
-
-        function closeComments() {
-            document.getElementById('comments-modal').classList.remove('active');
-            currentPostId = null;
-        }
-
-        function renderCommentsList(comments) {
-            const listEl = document.getElementById('comments-list');
-            listEl.innerHTML = '';
-
-            if (comments.length === 0) {
-                listEl.innerHTML = '<div style="text-align:center; color:#777; margin-top:20px;">لا توجد تعليقات بعد. كن أول من يعلق!</div>';
-                return;
-            }
-
-            comments.forEach(c => {
-                const item = document.createElement('div');
-                item.className = 'comment-item';
-                item.innerHTML = `
-                    <div class="comment-user">@${escapeHtml(c.username)}</div>
-                    <div class="comment-text">${escapeHtml(c.content)}</div>
-                `;
-                listEl.appendChild(item);
-            });
-            listEl.scrollTop = listEl.scrollHeight;
-        }
-
-        async function sendComment() {
-            const input = document.getElementById('comment-input');
-            const content = input.value.trim();
-            const username = localStorage.getItem('username');
-
-            if (!content || !currentPostId) return;
-
-            const res = await fetch('/comment', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    post_id: currentPostId,
-                    username: username,
-                    content: content
-                })
-            });
-
-            const data = await res.json();
-            if (data.success) {
-                input.value = '';
-                if (postsCache[currentPostId]) {
-                    postsCache[currentPostId].comments = data.comments;
-                }
-                renderCommentsList(data.comments);
-                const countSpan = document.getElementById(`comment-count-${currentPostId}`);
-                if (countSpan) countSpan.textContent = data.count;
-            } else {
-                alert(data.message || "حدث خطأ أثناء إضافة التعليق");
-            }
-        }
-
-        /* ===== نظام الرسائل الخاصة ===== */
-
-        function openMessagingModal() {
-            document.getElementById('messaging-modal').classList.add('active');
-            backToUserSearch();
-        }
-
-        function closeMessagingModal() {
-            document.getElementById('messaging-modal').classList.remove('active');
-            stopChatPolling();
-        }
-
-        async function handleUserSearch() {
-            const query = document.getElementById('user-search-input').value.trim();
-            const username = localStorage.getItem('username');
-            const listEl = document.getElementById('user-results-list');
-
-            if (!query) {
-                loadConversationsList();
-                return;
-            }
-
-            try {
-                const res = await fetch('/search_users', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query: query, username: username})
-                });
-                const users = await res.json();
-
-                listEl.innerHTML = '';
-                if (users.length === 0) {
-                    listEl.innerHTML = '<div style="text-align:center; color:#777; margin-top:20px;">لا يوجد مستخدمون بهذا الاسم</div>';
-                    return;
-                }
-
-                users.forEach(u => {
-                    const item = document.createElement('div');
-                    item.className = 'user-item';
-                    item.onclick = () => startChatWith(u.username);
-                    item.innerHTML = `
-                        <span class="user-item-name">@${escapeHtml(u.username)}</span>
-                        <span class="user-item-action">مراسلة 💬</span>
-                    `;
-                    listEl.appendChild(item);
-                });
-            } catch (err) {
-                console.error("خطأ في البحث:", err);
-            }
-        }
-
-        async function loadConversationsList() {
-            const username = localStorage.getItem('username');
-            const listEl = document.getElementById('user-results-list');
-
-            try {
-                const res = await fetch('/get_conversations', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username: username})
-                });
-                const convs = await res.json();
-
-                listEl.innerHTML = '';
-                if (convs.length === 0) {
-                    listEl.innerHTML = '<div style="text-align:center; color:#777; margin-top:20px;">لا توجد محادثات سابقة. ابحث عن مستخدم لبدء المراسلة.</div>';
-                    return;
-                }
-
-                convs.forEach(c => {
-                    const item = document.createElement('div');
-                    item.className = 'conv-item';
-                    item.onclick = () => startChatWith(c.other_username);
-                    item.innerHTML = `
-                        <div>
-                            <div class="user-item-name">@${escapeHtml(c.other_username)}</div>
-                            <div class="conv-last-msg">${escapeHtml(c.last_message)}</div>
-                        </div>
-                        ${c.unread_count > 0 ? `<span class="unread-badge" style="display:inline-block">${c.unread_count}</span>` : ''}
-                    `;
-                    listEl.appendChild(item);
-                });
-            } catch (err) {
-                console.error("خطأ في جلب المحادثات:", err);
-            }
-        }
-
-        async function startChatWith(targetUsername) {
-            const username = localStorage.getItem('username');
-            try {
-                const res = await fetch('/create_or_get_conversation', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username: username, target_username: targetUsername})
-                });
-                const data = await res.json();
-
-                if (data.success) {
-                    activeConversationId = data.conversation_id;
-                    activeTargetUsername = targetUsername;
-
-                    document.getElementById('search-view').style.display = 'none';
-                    document.getElementById('chat-view').style.display = 'flex';
-                    document.getElementById('back-messaging-btn').style.display = 'block';
-                    document.getElementById('messaging-title').textContent = `@${targetUsername}`;
-
-                    loadMessages();
-                    startChatPolling();
-                } else {
-                    alert(data.message || "تعذر فتح المحادثة");
-                }
-            } catch (err) {
-                console.error("خطأ في المحادثة:", err);
-            }
-        }
-
-        function backToUserSearch() {
-            stopChatPolling();
-            activeConversationId = null;
-            activeTargetUsername = null;
-
-            document.getElementById('search-view').style.display = 'flex';
-            document.getElementById('chat-view').style.display = 'none';
-            document.getElementById('back-messaging-btn').style.display = 'none';
-            document.getElementById('messaging-title').textContent = 'المحادثات الخاصة';
-            document.getElementById('user-search-input').value = '';
-            loadConversationsList();
-            checkGlobalUnread();
-        }
-
-        async function loadMessages() {
-            if (!activeConversationId) return;
-
-            const username = localStorage.getItem('username');
-            try {
-                const res = await fetch('/get_messages', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({conversation_id: activeConversationId, username: username})
-                });
-                const messages = await res.json();
-                renderMessages(messages);
-            } catch (err) {
-                console.error("خطأ في جلب الرسائل:", err);
-            }
-        }
-
-        function renderMessages(messages) {
-            const container = document.getElementById('chat-messages');
-            const currentUsername = localStorage.getItem('username');
-            
-            const isScrolledToBottom = container.scrollHeight - container.clientHeight <= container.scrollTop + 60;
-
-            container.innerHTML = '';
-
-            if (messages.length === 0) {
-                container.innerHTML = '<div style="text-align:center; color:#777; margin-top:20px;">لا توجد رسائل بعد. اكتب أول رسالة!</div>';
-                return;
-            }
-
-            messages.forEach(m => {
-                const isMe = m.sender_username === currentUsername;
-                const bubble = document.createElement('div');
-                bubble.className = `msg-bubble ${isMe ? 'msg-sent' : 'msg-received'}`;
-                bubble.innerHTML = `<div>${escapeHtml(m.content)}</div>`;
-                container.appendChild(bubble);
-            });
-
-            if (isScrolledToBottom) {
-                container.scrollTop = container.scrollHeight;
-            }
-        }
-
-        async function sendChatMessage() {
-            const input = document.getElementById('chat-input');
-            const content = input.value.trim();
-            const username = localStorage.getItem('username');
-
-            if (!content || !activeConversationId) return;
-
-            input.value = '';
-
-            try {
-                const res = await fetch('/send_message', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        conversation_id: activeConversationId,
-                        username: username,
-                        content: content
-                    })
-                });
-
-                const data = await res.json();
-                if (data.success) {
-                    await loadMessages();
-                    const container = document.getElementById('chat-messages');
-                    container.scrollTop = container.scrollHeight;
-                }
-            } catch (err) {
-                console.error("خطأ في الإرسال:", err);
-            }
-        }
-
-        function startChatPolling() {
-            stopChatPolling();
-            chatPollInterval = setInterval(loadMessages, 2000);
-        }
-
-        function stopChatPolling() {
-            if (chatPollInterval) {
-                clearInterval(chatPollInterval);
-                chatPollInterval = null;
-            }
-        }
-
-        async function checkGlobalUnread() {
-            const username = localStorage.getItem('username');
-            if (!username) return;
-
-            try {
-                const res = await fetch('/get_unread_count', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username: username})
-                });
-                const data = await res.json();
-                const badge = document.getElementById('global-unread-badge');
-                if (data.unread_count > 0) {
-                    badge.textContent = data.unread_count;
-                    badge.style.display = 'inline-block';
-                } else {
-                    badge.style.display = 'none';
-                }
-            } catch (err) {
-                console.error("خطأ في جلب الرسائل غير المقروءة:", err);
-            }
-        }
-
-        function escapeHtml(text) {
-            if (!text) return '';
-            return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-        }
-
-        document.getElementById('feed').addEventListener('scroll', () => {
-            document.querySelectorAll('video').forEach(video => {
-                const rect = video.getBoundingClientRect();
-                if (rect.top < window.innerHeight * 0.7 && rect.bottom > window.innerHeight * 0.3) {
-                    video.play().catch(() => {});
-                } else {
-                    video.pause();
-                }
-            });
-        });
-
-        document.getElementById('file-input').addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            const progressContainer = document.getElementById('progress-container');
-            const progressBar = document.getElementById('progress');
-            const percentText = document.getElementById('percent');
-
-            progressContainer.style.display = 'block';
-
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('username', localStorage.getItem('username'));
-
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/upload', true);
-
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    const percent = Math.round((e.loaded / e.total) * 100);
-                    progressBar.style.width = percent + '%';
-                    percentText.textContent = percent + '%';
-                }
-            };
-
-            xhr.onload = () => {
-                progressContainer.style.display = 'none';
-                if (xhr.status === 200) {
-                    loadFeed();
-                } else {
-                    alert("حدث خطأ أثناء الرفع");
-                }
-                document.getElementById('file-input').value = '';
-            };
-
-            xhr.send(formData);
-        });
-
-        window.onload = async () => {
-            await initUser();
-            await loadFeed();
-            checkGlobalUnread();
-            globalUnreadInterval = setInterval(checkGlobalUnread, 4000);
-        };
+        loadAdminData();
     </script>
-</body>
-</html>
-'''
+    """
+    return render_template_string(
+        BASE_LAYOUT, title="لوحة الإدارة", content=content,
+        user_coins=user['coins'], username=user['username'], profile_photo=user['profile_photo']
+    )
 
-# -------------------------------------------------------------
-# مسارات الصفحة والواجهة
-# -------------------------------------------------------------
+# =========================================================
+# Internal REST APIs (JSON responses with input validation)
+# =========================================================
 
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/verify_user', methods=['POST'])
-def verify_user():
+@app.route('/api/auth/register', methods=['POST'])
+def api_register():
     data = request.json or {}
     username = data.get('username', '').strip()
-    if not username or not supabase:
-        return jsonify({'exists': False})
+    email = data.get('email', '').strip().lower()
+    password = data.get('password', '')
+
+    if not username or not email or not password:
+        return jsonify({"error": "جميع الحقول مطلوبة"}), 400
+
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        return jsonify({"error": "البريد الإلكتروني غير صحيح"}), 400
+
+    # Check existence
+    existing = supabase.table("accounts").select("id").or_(f"username.eq.{username},email.eq.{email}").execute()
+    if existing.data:
+        return jsonify({"error": "اسم المستخدم أو البريد المستعمل موجود بالفعل"}), 400
+
+    hashed_pw = generate_password_hash(password)
     
-    try:
-        res = supabase.table('accounts').select('id').eq('username', username).execute()
-        return jsonify({'exists': bool(res.data and len(res.data) > 0)})
-    except Exception as e:
-        print("Verify User Error:", e)
-        return jsonify({'exists': False})
+    # Get initial balance setting
+    settings = supabase.table("app_settings").select("setting_value").eq("setting_key", "welcome_bonus").execute()
+    welcome_coins = int(settings.data[0]['setting_value']) if settings.data else 100
 
-@app.route('/register', methods=['POST'])
-def register():
+    res = supabase.table("accounts").insert({
+        "username": username,
+        "email": email,
+        "password_hash": hashed_pw,
+        "coins": welcome_coins,
+        "total_earned": welcome_coins
+    }).execute()
+
+    if res.data:
+        new_user = res.data[0]
+        session['user_id'] = new_user['id']
+        session['username'] = new_user['username']
+        session['is_admin'] = new_user['is_admin']
+
+        log_coin_transaction(new_user['id'], welcome_coins, "BONUS", "مكافأة التسجيل الجديد")
+        create_notification(new_user['id'], "مرحباً بك!", f"لقد حصلت على {welcome_coins} نقطة هدية التسجيل.")
+
+        return jsonify({"success": True})
+    
+    return jsonify({"error": "فشل إنشاء الحساب"}), 500
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_login():
     data = request.json or {}
-    username = data.get('username', '').strip()
+    identity = data.get('identity', '').strip()
+    password = data.get('password', '')
 
-    if not username or not supabase:
-        return jsonify({"success": False, "message": "اسم المستخدم مطلوب"}), 400
+    if not identity or not password:
+        return jsonify({"error": "يرجى كتابة كافة البيانات"}), 400
 
-    try:
-        check_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        if check_res.data and len(check_res.data) > 0:
-            return jsonify({"success": False, "message": "اسم المستخدم مستخدم بالفعل، اختر اسماً آخر"})
+    res = supabase.table("accounts").select("*").or_(f"username.eq.{identity},email.eq.{identity}").execute()
+    
+    if not res.data:
+        return jsonify({"error": "بيانات الدخول غير صحيحة"}), 400
 
-        new_user = supabase.table('accounts').insert({'username': username}).execute()
-        return jsonify({"success": True, "username": username, "user_id": new_user.data[0]['id']})
-    except Exception as e:
-        print("Register Error:", e)
-        return jsonify({"success": False, "message": str(e)}), 500
+    user = res.data[0]
+    
+    if user['is_banned']:
+        return jsonify({"error": "هذا الحساب محظور من الاستخدام"}), 403
 
-@app.route('/upload', methods=['POST'])
-def upload():
-    if not supabase:
-        return jsonify({'message': 'إعدادات Supabase غير متوفرة'}), 500
-        
-    try:
-        if 'file' not in request.files:
-            return jsonify({'message': 'لم يتم اختيار ملف'}), 400
-        file = request.files['file']
-        username = request.form.get('username', '').strip()
-        
-        if file.filename == '' or not allowed_file(file.filename):
-            return jsonify({'message': 'نوع الملف غير مدعوم'}), 400
+    if check_password_hash(user['password_hash'], password):
+        session['user_id'] = user['id']
+        session['username'] = user['username']
+        session['is_admin'] = user['is_admin']
+        return jsonify({"success": True})
+    
+    return jsonify({"error": "بيانات الدخول غير صحيحة"}), 400
 
-        user_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        if not user_res.data:
-            return jsonify({'message': 'المستخدم غير موجود'}), 400
-        user_id = user_res.data[0]['id']
+@app.route('/api/tasks', methods=['GET'])
+@login_required
+def api_get_tasks():
+    current_uid = session['user_id']
+    platform = request.args.get('platform')
+    search = request.args.get('search')
 
-        ext = file.filename.rsplit('.', 1)[1].lower()
-        unique_filename = f"{uuid.uuid4()}.{ext}"
-        
-        file_bytes = file.read()
-        supabase.storage.from_(BUCKET_NAME).upload(
-            path=unique_filename,
-            file=file_bytes,
-            file_options={"content-type": file.content_type}
-        )
-        
-        public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
-        
-        supabase.table('posts').insert({
-            'user_id': user_id,
-            'media_url': public_url
-        }).execute()
-        
-        return jsonify({'message': 'تم الرفع بنجاح'})
-    except Exception as e:
-        print("Upload Error:", e)
-        return jsonify({'message': str(e)}), 500
+    # Query active tasks excluding user's own tasks
+    query = supabase.table("tasks").select("*").eq("status", "active").neq("owner_id", current_uid)
+    
+    if platform:
+        query = query.eq("platform", platform)
+    if search:
+        query = query.ilike("task_type", f"%{search}%")
 
-@app.route('/feed')
-def get_feed():
-    if not supabase:
-        return jsonify([])
-        
-    try:
-        posts = supabase.table('posts').select('id, user_id, media_url, created_at, accounts(username)').order('created_at', desc=True).execute().data
-        likes = supabase.table('likes').select('post_id, user_id, accounts(username)').execute().data
-        comments = supabase.table('comments').select('id, post_id, content, created_at, accounts(username)').order('created_at', desc=False).execute().data
+    tasks_res = query.order("created_at", desc=True).execute()
+    
+    # Get list of task IDs user has already completed
+    completed_res = supabase.table("completed_tasks").select("task_id").eq("user_id", current_uid).execute()
+    completed_ids = {c['task_id'] for c in completed_res.data} if completed_res.data else set()
 
-        likes_map = {}
-        for l in likes:
-            pid = l['post_id']
-            uname = l.get('accounts', {}).get('username') if isinstance(l.get('accounts'), dict) else None
-            if pid not in likes_map:
-                likes_map[pid] = []
-            if uname:
-                likes_map[pid].append(uname)
+    # Filter out already executed tasks
+    available_tasks = [t for t in tasks_res.data if t['id'] not in completed_ids]
 
-        comments_map = {}
-        for c in comments:
-            pid = c['post_id']
-            uname = c.get('accounts', {}).get('username') if isinstance(c.get('accounts'), dict) else 'مستخدم'
-            if pid not in comments_map:
-                comments_map[pid] = []
-            comments_map[pid].append({
-                'id': c['id'],
-                'username': uname,
-                'content': c['content'],
-                'created_at': c.get('created_at')
-            })
+    return jsonify(available_tasks)
 
-        formatted_posts = []
-        for p in posts:
-            pid = p['id']
-            publisher = p.get('accounts', {}).get('username') if isinstance(p.get('accounts'), dict) else 'مستخدم'
-            liked_users = likes_map.get(pid, [])
-            post_comments = comments_map.get(pid, [])
-            
-            formatted_posts.append({
-                'id': pid,
-                'media_url': p['media_url'],
-                'publisher': publisher,
-                'likes_count': len(liked_users),
-                'liked_users': liked_users,
-                'comments': post_comments
-            })
-
-        return jsonify(formatted_posts)
-    except Exception as e:
-        print("Error fetching feed:", e)
-        return jsonify([])
-
-@app.route('/like', methods=['POST'])
-def like():
+@app.route('/api/tasks', methods=['POST'])
+@login_required
+def api_create_task():
+    user = get_current_user()
     data = request.json or {}
-    post_id = data.get('post_id')
-    username = data.get('username')
 
-    if not post_id or not username or not supabase:
-        return jsonify({"success": False, "message": "بيانات ناقصة"}), 400
+    platform = data.get('platform')
+    task_type = data.get('task_type')
+    target_url = data.get('target_url')
+    reward = int(data.get('reward', 0))
+    required_count = int(data.get('required_count', 0))
 
-    try:
-        user_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        if not user_res.data:
-            return jsonify({"success": False, "message": "المستخدم غير موجود"}), 404
-        user_id = user_res.data[0]['id']
+    if not all([platform, task_type, target_url]) or reward <= 0 or required_count <= 0:
+        return jsonify({"error": "مدخلات غير صالحة"}), 400
 
-        existing_like = supabase.table('likes').select('id').eq('user_id', user_id).eq('post_id', post_id).execute()
+    total_cost = reward * required_count
 
-        if existing_like.data and len(existing_like.data) > 0:
-            supabase.table('likes').delete().eq('user_id', user_id).eq('post_id', post_id).execute()
-            liked = False
-        else:
-            supabase.table('likes').insert({'user_id': user_id, 'post_id': post_id}).execute()
-            liked = True
+    if user['coins'] < total_cost:
+        return jsonify({"error": f"رصيدك غير كافي. تحتاج إلى {total_cost} نقطة."}), 400
 
-        count_res = supabase.table('likes').select('id', count='exact').eq('post_id', post_id).execute()
-        new_count = count_res.count if count_res.count is not None else len(count_res.data)
+    # Deduct coins from owner
+    new_balance = user['coins'] - total_cost
+    supabase.table("accounts").update({
+        "coins": new_balance,
+        "total_spent": user['total_spent'] + total_cost
+    }).eq("id", user['id']).execute()
 
-        return jsonify({"success": True, "count": new_count, "liked": liked})
-    except Exception as e:
-        print("Like Error:", e)
-        return jsonify({"success": False, "message": str(e)}), 500
+    # Create task
+    task_res = supabase.table("tasks").insert({
+        "owner_id": user['id'],
+        "platform": platform,
+        "task_type": task_type,
+        "target_url": target_url,
+        "reward": reward,
+        "required_count": required_count,
+        "status": "active"
+    }).execute()
 
-@app.route('/comment', methods=['POST'])
-def add_comment():
-    data = request.json or {}
-    post_id = data.get('post_id')
-    username = data.get('username')
-    content = data.get('content', '').strip()
+    log_coin_transaction(user['id'], -total_cost, "SPENT", f"إنشاء مهمة {platform}")
 
-    if not post_id or not username or not content or not supabase:
-        return jsonify({"success": False, "message": "التعليق لا يمكن أن يكون فارغاً"}), 400
+    return jsonify({"success": True, "new_balance": new_balance})
 
-    try:
-        user_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        if not user_res.data:
-            return jsonify({"success": False, "message": "المستخدم غير موجود"}), 404
-        user_id = user_res.data[0]['id']
+@app.route('/api/tasks/<int:task_id>/complete', methods=['POST'])
+@login_required
+def api_complete_task(task_id):
+    user_id = session['user_id']
+    
+    # Check task existence
+    task_res = supabase.table("tasks").select("*").eq("id", task_id).execute()
+    if not task_res.data:
+        return jsonify({"error": "المهمة غير موجودة"}), 404
 
-        supabase.table('comments').insert({
-            'user_id': user_id,
-            'post_id': post_id,
-            'content': content
-        }).execute()
+    task = task_res.data[0]
 
-        comments_res = supabase.table('comments').select('id, content, created_at, accounts(username)').eq('post_id', post_id).order('created_at', desc=False).execute()
-        
-        formatted_comments = []
-        for c in comments_res.data:
-            uname = c.get('accounts', {}).get('username') if isinstance(c.get('accounts'), dict) else 'مستخدم'
-            formatted_comments.append({
-                'id': c['id'],
-                'username': uname,
-                'content': c['content'],
-                'created_at': c.get('created_at')
-            })
+    if task['owner_id'] == user_id:
+        return jsonify({"error": "لا يمكنك تنفيذ مهمتك الخاصة"}), 400
 
-        return jsonify({"success": True, "comments": formatted_comments, "count": len(formatted_comments)})
-    except Exception as e:
-        print("Comment Error:", e)
-        return jsonify({"success": False, "message": str(e)}), 500
+    if task['status'] != 'active' or task['completed_count'] >= task['required_count']:
+        return jsonify({"error": "هذه المهمة مكتملة أو غير نشطة"}), 400
 
-# -------------------------------------------------------------
-# مسارات الرسائل الخاصة (المواصفات المطلوبة كاملاً)
-# -------------------------------------------------------------
+    # Prevent duplicate completion
+    check_done = supabase.table("completed_tasks").select("id").eq("task_id", task_id).eq("user_id", user_id).execute()
+    if check_done.data:
+        return jsonify({"error": "لقد قمت بتنفيذ هذه المهمة من قبل"}), 400
 
-@app.route('/search_users', methods=['POST'])
-def search_users():
-    data = request.json or {}
-    query = data.get('query', '').strip()
-    current_username = data.get('username', '').strip()
+    # 1. Insert completion record
+    supabase.table("completed_tasks").insert({
+        "task_id": task_id,
+        "user_id": user_id,
+        "rewarded": task['reward']
+    }).execute()
 
-    if not query or not supabase:
-        return jsonify([])
+    # 2. Update Task Count
+    new_completed = task['completed_count'] + 1
+    new_status = 'completed' if new_completed >= task['required_count'] else 'active'
+    
+    supabase.table("tasks").update({
+        "completed_count": new_completed,
+        "status": new_status
+    }).eq("id", task_id).execute()
 
-    try:
-        res = supabase.table('accounts').select('id, username')\
-            .ilike('username', f'%{query}%')\
-            .neq('username', current_username)\
-            .limit(10).execute()
-        return jsonify(res.data or [])
-    except Exception as e:
-        print("Search Users Error:", e)
-        return jsonify([])
+    # 3. Add rewards to worker
+    worker = get_current_user()
+    new_coins = worker['coins'] + task['reward']
+    
+    supabase.table("accounts").update({
+        "coins": new_coins,
+        "total_earned": worker['total_earned'] + task['reward']
+    }).eq("id", user_id).execute()
 
-@app.route('/create_or_get_conversation', methods=['POST'])
-def create_or_get_conversation():
-    data = request.json or {}
-    username = data.get('username', '').strip()
-    target_username = data.get('target_username', '').strip()
+    log_coin_transaction(user_id, task['reward'], "EARNED", f"إكمال مهمة #{task_id}")
+    create_notification(user_id, "تم كسب نقاط!", f"حصلت على {task['reward']} نقطة لقاء إكمال مهمة {task['platform']}.")
 
-    if not username or not target_username or username == target_username or not supabase:
-        return jsonify({'success': False, 'message': 'طلب غير صالح'}), 400
+    return jsonify({"success": True, "reward": task['reward'], "new_balance": new_coins})
 
-    try:
-        u1_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        u2_res = supabase.table('accounts').select('id').eq('username', target_username).execute()
+@app.route('/api/my-tasks', methods=['GET'])
+@login_required
+def api_my_tasks():
+    res = supabase.table("tasks").select("*").eq("owner_id", session['user_id']).order("created_at", desc=True).execute()
+    return jsonify(res.data)
 
-        if not u1_res.data or not u2_res.data:
-            return jsonify({'success': False, 'message': 'المستخدم غير موجود'}), 404
+@app.route('/api/tasks/<int:task_id>', methods=['DELETE'])
+@login_required
+def api_delete_task(task_id):
+    # Ensure owner is executing
+    res = supabase.table("tasks").select("*").eq("id", task_id).eq("owner_id", session['user_id']).execute()
+    if not res.data:
+        return jsonify({"error": "المهمة غير موجودة أو غير مملوكة لك"}), 404
 
-        u1_id = u1_res.data[0]['id']
-        u2_id = u2_res.data[0]['id']
+    supabase.table("tasks").delete().eq("id", task_id).execute()
+    return jsonify({"success": True})
 
-        # منع التكرار باستخدام الترتيب التصاعدي للمعرفات
-        low_id, high_id = sorted([u1_id, u2_id])
+@app.route('/api/user/history', methods=['GET'])
+@login_required
+def api_user_history():
+    res = supabase.table("coin_history").select("*").eq("user_id", session['user_id']).order("created_at", desc=True).execute()
+    return jsonify(res.data)
 
-        conv = supabase.table('conversations').select('id')\
-            .eq('user1_id', low_id).eq('user2_id', high_id).execute()
+@app.route('/api/user/notifications', methods=['GET'])
+@login_required
+def api_user_notifications():
+    res = supabase.table("notifications").select("*").eq("user_id", session['user_id']).order("created_at", desc=True).execute()
+    return jsonify(res.data)
 
-        if conv.data and len(conv.data) > 0:
-            return jsonify({'success': True, 'conversation_id': conv.data[0]['id']})
-
-        new_conv = supabase.table('conversations').insert({
-            'user1_id': low_id,
-            'user2_id': high_id
-        }).execute()
-
-        return jsonify({'success': True, 'conversation_id': new_conv.data[0]['id']})
-    except Exception as e:
-        print("Conversation Error:", e)
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/get_conversations', methods=['POST'])
-def get_conversations():
-    data = request.json or {}
-    username = data.get('username', '').strip()
-
-    if not username or not supabase:
-        return jsonify([])
-
-    try:
-        user_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        if not user_res.data:
-            return jsonify([])
-        my_id = user_res.data[0]['id']
-
-        convs1 = supabase.table('conversations').select('id, user1_id, user2_id').eq('user1_id', my_id).execute().data or []
-        convs2 = supabase.table('conversations').select('id, user1_id, user2_id').eq('user2_id', my_id).execute().data or []
-        all_convs = convs1 + convs2
-
-        results = []
-        for c in all_convs:
-            other_id = c['user2_id'] if c['user1_id'] == my_id else c['user1_id']
-            other_user = supabase.table('accounts').select('username').eq('id', other_id).execute().data
-            other_uname = other_user[0]['username'] if other_user else 'مستخدم'
-
-            last_msg_res = supabase.table('messages').select('content, created_at')\
-                .eq('conversation_id', c['id']).order('created_at', desc=True).limit(1).execute().data
-            
-            last_msg = last_msg_res[0]['content'] if last_msg_res else 'لا توجد رسائل بعد'
-
-            unread_res = supabase.table('messages').select('id', count='exact')\
-                .eq('conversation_id', c['id']).neq('sender_id', my_id).eq('is_read', False).execute()
-            
-            unread_count = unread_res.count if unread_res.count is not None else 0
-
-            results.append({
-                'conversation_id': c['id'],
-                'other_username': other_uname,
-                'last_message': last_msg,
-                'unread_count': unread_count
-            })
-
-        return jsonify(results)
-    except Exception as e:
-        print("Get Conversations Error:", e)
-        return jsonify([])
-
-@app.route('/get_messages', methods=['POST'])
-def get_messages():
-    data = request.json or {}
-    conversation_id = data.get('conversation_id')
-    username = data.get('username')
-
-    if not conversation_id or not supabase:
-        return jsonify([])
-
-    try:
-        # تحديد الرسائل المستقبلة كـ "مقروءة"
-        if username:
-            user_res = supabase.table('accounts').select('id').eq('username', username).execute()
-            if user_res.data:
-                my_id = user_res.data[0]['id']
-                supabase.table('messages').update({'is_read': True})\
-                    .eq('conversation_id', conversation_id)\
-                    .neq('sender_id', my_id)\
-                    .eq('is_read', False).execute()
-
-        res = supabase.table('messages')\
-            .select('id, conversation_id, sender_id, content, created_at, accounts(username)')\
-            .eq('conversation_id', conversation_id)\
-            .order('created_at', desc=False).execute()
-
-        messages = []
-        for m in res.data or []:
-            uname = m.get('accounts', {}).get('username') if isinstance(m.get('accounts'), dict) else 'مستخدم'
-            messages.append({
-                'id': m['id'],
-                'sender_id': m['sender_id'],
-                'sender_username': uname,
-                'content': m['content'],
-                'created_at': m.get('created_at')
-            })
-
-        return jsonify(messages)
-    except Exception as e:
-        print("Get Messages Error:", e)
-        return jsonify([])
-
-@app.route('/send_message', methods=['POST'])
-def send_message():
-    data = request.json or {}
-    conversation_id = data.get('conversation_id')
-    username = data.get('username')
-    content = data.get('content', '').strip()
-
-    if not conversation_id or not username or not content or not supabase:
-        return jsonify({'success': False, 'message': 'بيانات ناقصة'}), 400
-
-    try:
-        user_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        if not user_res.data:
-            return jsonify({'success': False, 'message': 'المستخدم غير موجود'}), 404
-        sender_id = user_res.data[0]['id']
-
-        supabase.table('messages').insert({
-            'conversation_id': conversation_id,
-            'sender_id': sender_id,
-            'content': content,
-            'is_read': False
-        }).execute()
-
-        return jsonify({'success': True})
-    except Exception as e:
-        print("Send Message Error:", e)
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/get_unread_count', methods=['POST'])
-def get_unread_count():
-    data = request.json or {}
-    username = data.get('username')
-
-    if not username or not supabase:
-        return jsonify({'unread_count': 0})
-
-    try:
-        user_res = supabase.table('accounts').select('id').eq('username', username).execute()
-        if not user_res.data:
-            return jsonify({'unread_count': 0})
-        my_id = user_res.data[0]['id']
-
-        convs1 = supabase.table('conversations').select('id').eq('user1_id', my_id).execute().data or []
-        convs2 = supabase.table('conversations').select('id').eq('user2_id', my_id).execute().data or []
-        c_ids = [c['id'] for c in (convs1 + convs2)]
-
-        if not c_ids:
-            return jsonify({'unread_count': 0})
-
-        unread = supabase.table('messages').select('id', count='exact')\
-            .in_('conversation_id', c_ids)\
-            .neq('sender_id', my_id)\
-            .eq('is_read', False).execute()
-
-        count = unread.count if unread.count is not None else 0
-        return jsonify({'unread_count': count})
-    except Exception as e:
-        print("Unread Count Error:", e)
-        return jsonify({'unread_count': 0})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+@app.route('/api/user/profile', methods=['
