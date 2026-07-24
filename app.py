@@ -33,7 +33,21 @@ HTML_TEMPLATE = '''
         @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family:'Cairo',sans-serif; background:#000; color:white; overflow:hidden; height:100vh; }
-        .header { position:fixed; top:0; left:0; right:0; background:rgba(0,0,0,0.85); padding:15px; text-align:center; z-index:100; font-size:20px; font-weight:700; }
+        
+        .header { 
+            position:fixed; top:0; left:0; right:0; 
+            background:rgba(0,0,0,0.85); padding:15px; 
+            text-align:center; z-index:100; font-size:20px; font-weight:700; 
+            display:flex; justify-content:center; align-items:center;
+        }
+        
+        .chat-btn-header {
+            position:absolute; left:15px; top:50%; transform:translateY(-50%);
+            background:#ff0050; color:white; border:none; padding:6px 14px;
+            border-radius:20px; font-size:13px; font-family:'Cairo', sans-serif;
+            font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:5px;
+        }
+
         .tiktok-container { height:100vh; overflow-y:scroll; scroll-snap-type:y mandatory; scroll-behavior:smooth; }
         .media-slide { height:100vh; scroll-snap-align:start; display:flex; align-items:center; justify-content:center; background:#111; position:relative; }
         .media-slide video, .media-slide img { max-height:100%; max-width:100%; object-fit:contain; }
@@ -101,10 +115,73 @@ HTML_TEMPLATE = '''
             background:#ff0050; color:white; border:none; padding:0 18px;
             margin-right:8px; border-radius:25px; font-weight:bold; cursor:pointer;
         }
+
+        /* نافذة الرسائل الخاصة */
+        .messaging-modal {
+            position:fixed; bottom:-100%; left:0; right:0;
+            height:80vh; background:#181818; border-top-left-radius:20px; border-top-right-radius:20px;
+            z-index:600; transition:bottom 0.3s ease-in-out; display:flex; flex-direction:column;
+            box-shadow:0 -5px 25px rgba(0,0,0,0.8);
+        }
+        .messaging-modal.active { bottom:0; }
+        
+        .messaging-header {
+            padding:15px; text-align:center; font-weight:bold; border-bottom:1px solid #333; 
+            position:relative; display:flex; align-items:center; justify-content:center;
+        }
+        .close-messaging { position:absolute; left:15px; cursor:pointer; font-size:18px; color:#888; }
+        .back-messaging { position:absolute; right:15px; cursor:pointer; font-size:18px; color:#888; display:none; }
+
+        /* منطقة البحث عن مستخدمين */
+        .search-area { padding:12px 15px; border-bottom:1px solid #222; }
+        .search-input {
+            width:100%; background:#222; border:1px solid #444; color:white;
+            padding:10px 15px; border-radius:20px; outline:none; font-family:'Cairo', sans-serif;
+        }
+
+        .user-list { flex:1; overflow-y:auto; padding:10px 15px; }
+        .user-item {
+            display:flex; align-items:center; justify-content:space-between;
+            padding:12px 15px; background:#222; border-radius:12px; margin-bottom:8px; cursor:pointer; transition:0.2s;
+        }
+        .user-item:hover { background:#2a2a2a; }
+        .user-item-name { font-weight:bold; color:#fff; }
+        .user-item-action { font-size:12px; color:#ff0050; font-weight:bold; }
+
+        /* منطقة المحادثة النشطة */
+        .chat-view { display:none; flex-direction:column; flex:1; overflow:hidden; }
+        .chat-messages { flex:1; overflow-y:auto; padding:15px; display:flex; flex-direction:column; gap:10px; }
+        
+        .msg-bubble {
+            max-width:75%; padding:10px 14px; border-radius:16px; font-size:14px; word-break:break-word; line-height:1.4;
+        }
+        .msg-sent {
+            align-self:flex-start; background:#ff0050; color:white; border-bottom-right-radius:4px;
+        }
+        .msg-received {
+            align-self:flex-end; background:#2c2c2e; color:white; border-bottom-left-radius:4px;
+        }
+        .msg-sender { font-size:10px; opacity:0.7; margin-bottom:2px; font-weight:bold; }
+
+        .chat-input-area {
+            display:flex; padding:10px 15px; border-top:1px solid #333; background:#111;
+        }
+        .chat-input {
+            flex:1; background:#222; border:1px solid #444; color:white;
+            padding:10px 15px; border-radius:25px; outline:none; font-family:'Cairo', sans-serif;
+        }
+        .send-msg-btn {
+            background:#ff0050; color:white; border:none; padding:0 18px;
+            margin-right:8px; border-radius:25px; font-weight:bold; cursor:pointer;
+        }
     </style>
 </head>
 <body>
-    <div class="header">FollowerBoost Feed</div>
+    <div class="header">
+        <span>FollowerBoost Feed</span>
+        <button class="chat-btn-header" onclick="openMessagingModal()">💬 الرسائل</button>
+    </div>
+    
     <div class="tiktok-container" id="feed"></div>
 
     <button class="upload-btn" onclick="document.getElementById('file-input').click()">📤 رفع</button>
@@ -130,9 +207,42 @@ HTML_TEMPLATE = '''
         </div>
     </div>
 
+    <!-- نافذة الرسائل الخاصة -->
+    <div class="messaging-modal" id="messaging-modal">
+        <div class="messaging-header">
+            <span class="back-messaging" id="back-messaging-btn" onclick="backToUserSearch()">➔</span>
+            <span id="messaging-title">المحادثات الخاصة</span>
+            <span class="close-messaging" onclick="closeMessagingModal()">✕</span>
+        </div>
+
+        <!-- عرض البحث والقائمة -->
+        <div id="search-view" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
+            <div class="search-area">
+                <input type="text" id="user-search-input" class="search-input" placeholder="ابحث عن اسم مستخدم للمراسلة..." oninput="handleUserSearch()">
+            </div>
+            <div class="user-list" id="user-results-list">
+                <div style="text-align:center; color:#777; margin-top:20px;">اكتب اسم المستخدم للبحث والبدء في المحادثة</div>
+            </div>
+        </div>
+
+        <!-- عرض المحادثة النشطة -->
+        <div class="chat-view" id="chat-view">
+            <div class="chat-messages" id="chat-messages"></div>
+            <div class="chat-input-area">
+                <input type="text" id="chat-input" class="chat-input" placeholder="اكتب رسالة..." onkeypress="if(event.key==='Enter') sendChatMessage()">
+                <button class="send-msg-btn" onclick="sendChatMessage()">إرسال</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let currentPostId = null;
         let postsCache = {};
+        
+        // متغيرات حالة نظام الرسائل
+        let activeConversationId = null;
+        let activeTargetUsername = null;
+        let chatPollInterval = null;
 
         async function initUser() {
             let username = localStorage.getItem('username');
@@ -303,6 +413,190 @@ HTML_TEMPLATE = '''
             }
         }
 
+        /* ----- وظائف نظام الرسائل الخاصة ----- */
+
+        function openMessagingModal() {
+            document.getElementById('messaging-modal').classList.add('active');
+            backToUserSearch();
+        }
+
+        function closeMessagingModal() {
+            document.getElementById('messaging-modal').classList.remove('active');
+            stopChatPolling();
+        }
+
+        async function handleUserSearch() {
+            const query = document.getElementById('user-search-input').value.trim();
+            const username = localStorage.getItem('username');
+            const listEl = document.getElementById('user-results-list');
+
+            if (!query) {
+                listEl.innerHTML = '<div style="text-align:center; color:#777; margin-top:20px;">اكتب اسم المستخدم للبحث والبدء في المحادثة</div>';
+                return;
+            }
+
+            try {
+                const res = await fetch('/search_users', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({query: query, username: username})
+                });
+                const users = await res.json();
+
+                listEl.innerHTML = '';
+                if (users.length === 0) {
+                    listEl.innerHTML = '<div style="text-align:center; color:#777; margin-top:20px;">لم يتم العثور على مستخدمين مطبقين</div>';
+                    return;
+                }
+
+                users.forEach(u => {
+                    const item = document.createElement('div');
+                    item.className = 'user-item';
+                    item.onclick = () => startChatWith(u.username);
+                    item.innerHTML = `
+                        <span class="user-item-name">@${escapeHtml(u.username)}</span>
+                        <span class="user-item-action">مراسلة 💬</span>
+                    `;
+                    listEl.appendChild(item);
+                });
+            } catch (err) {
+                console.error("خطأ أثناء البحث عن مستخدمين:", err);
+            }
+        }
+
+        async function startChatWith(targetUsername) {
+            const username = localStorage.getItem('username');
+            try {
+                const res = await fetch('/create_or_get_conversation', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username: username, target_username: targetUsername})
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    activeConversationId = data.conversation_id;
+                    activeTargetUsername = targetUsername;
+
+                    document.getElementById('search-view').style.display = 'none';
+                    document.getElementById('chat-view').style.display = 'flex';
+                    document.getElementById('back-messaging-btn').style.display = 'block';
+                    document.getElementById('messaging-title').textContent = `@${targetUsername}`;
+
+                    loadMessages();
+                    startChatPolling();
+                } else {
+                    alert(data.message || "تعذر فتح المحادثة");
+                }
+            } catch (err) {
+                console.error("خطأ في إنشاء أو جلب المحادثة:", err);
+            }
+        }
+
+        function backToUserSearch() {
+            stopChatPolling();
+            activeConversationId = null;
+            activeTargetUsername = null;
+
+            document.getElementById('search-view').style.display = 'flex';
+            document.getElementById('chat-view').style.display = 'none';
+            document.getElementById('back-messaging-btn').style.display = 'none';
+            document.getElementById('messaging-title').textContent = 'المحادثات الخاصة';
+            document.getElementById('user-search-input').value = '';
+            handleUserSearch();
+        }
+
+        async function loadMessages() {
+            if (!activeConversationId) return;
+
+            try {
+                const res = await fetch('/get_messages', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({conversation_id: activeConversationId})
+                });
+                const messages = await res.json();
+                renderMessages(messages);
+            } catch (err) {
+                console.error("خطأ أثناء جلب الرسائل:", err);
+            }
+        }
+
+        function renderMessages(messages) {
+            const container = document.getElementById('chat-messages');
+            const currentUsername = localStorage.getItem('username');
+            
+            // التحقق من حالة التمرير الحالية لتجنب إزعاج المستخدم إذا كان يقرأ الرسائل العلوية
+            const isScrolledToBottom = container.scrollHeight - container.clientHeight <= container.scrollTop + 50;
+
+            container.innerHTML = '';
+
+            if (messages.length === 0) {
+                container.innerHTML = '<div style="text-align:center; color:#777; margin-top:20px;">لا توجد رسائل بعد. ابدأ المحادثة الآن!</div>';
+                return;
+            }
+
+            messages.forEach(m => {
+                const isMe = m.sender_username === currentUsername;
+                const bubble = document.createElement('div');
+                bubble.className = `msg-bubble ${isMe ? 'msg-sent' : 'msg-received'}`;
+                bubble.innerHTML = `
+                    <div class="msg-sender">${escapeHtml(m.sender_username)}</div>
+                    <div>${escapeHtml(m.content)}</div>
+                `;
+                container.appendChild(bubble);
+            });
+
+            if (isScrolledToBottom) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
+
+        async function sendChatMessage() {
+            const input = document.getElementById('chat-input');
+            const content = input.value.trim();
+            const username = localStorage.getItem('username');
+
+            if (!content || !activeConversationId) return;
+
+            input.value = '';
+
+            try {
+                const res = await fetch('/send_message', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        conversation_id: activeConversationId,
+                        username: username,
+                        content: content
+                    })
+                });
+
+                const data = await res.json();
+                if (data.success) {
+                    await loadMessages();
+                    const container = document.getElementById('chat-messages');
+                    container.scrollTop = container.scrollHeight;
+                } else {
+                    alert(data.message || "فشل إرسال الرسالة");
+                }
+            } catch (err) {
+                console.error("خطأ في إرسال الرسالة:", err);
+            }
+        }
+
+        function startChatPolling() {
+            stopChatPolling();
+            chatPollInterval = setInterval(loadMessages, 2000);
+        }
+
+        function stopChatPolling() {
+            if (chatPollInterval) {
+                clearInterval(chatPollInterval);
+                chatPollInterval = null;
+            }
+        }
+
         function escapeHtml(text) {
             if (!text) return '';
             return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
@@ -393,12 +687,10 @@ def register():
         return jsonify({"success": False, "message": "اسم المستخدم مطلوب"}), 400
 
     try:
-        # فحص هل الاسم مستخدم مسبقاً
         check_res = supabase.table('accounts').select('id').eq('username', username).execute()
         if check_res.data and len(check_res.data) > 0:
             return jsonify({"success": False, "message": "اسم المستخدم مستخدم بالفعل، اختر اسماً آخر"})
 
-        # إضافة حساب جديد
         new_user = supabase.table('accounts').insert({'username': username}).execute()
         return jsonify({"success": True, "username": username, "user_id": new_user.data[0]['id']})
     except Exception as e:
@@ -419,7 +711,6 @@ def upload():
         if file.filename == '' or not allowed_file(file.filename):
             return jsonify({'message': 'نوع الملف غير مدعوم'}), 400
 
-        # جلب id المستخدم
         user_res = supabase.table('accounts').select('id').eq('username', username).execute()
         if not user_res.data:
             return jsonify({'message': 'المستخدم غير موجود'}), 400
@@ -428,7 +719,6 @@ def upload():
         ext = file.filename.rsplit('.', 1)[1].lower()
         unique_filename = f"{uuid.uuid4()}.{ext}"
         
-        # رفع الملف إلى Supabase Storage
         file_bytes = file.read()
         supabase.storage.from_(BUCKET_NAME).upload(
             path=unique_filename,
@@ -436,10 +726,8 @@ def upload():
             file_options={"content-type": file.content_type}
         )
         
-        # استخراج الرابط العام
         public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
         
-        # حفظ المنشور في جدول posts
         supabase.table('posts').insert({
             'user_id': user_id,
             'media_url': public_url
@@ -456,12 +744,10 @@ def get_feed():
         return jsonify([])
         
     try:
-        # جلب البيانات من الجداول المربوطة
         posts = supabase.table('posts').select('id, user_id, media_url, created_at, accounts(username)').order('created_at', desc=True).execute().data
         likes = supabase.table('likes').select('post_id, user_id, accounts(username)').execute().data
         comments = supabase.table('comments').select('id, post_id, content, created_at, accounts(username)').order('created_at', desc=False).execute().data
 
-        # تجميع اللايكات لكل منشور
         likes_map = {}
         for l in likes:
             pid = l['post_id']
@@ -471,7 +757,6 @@ def get_feed():
             if uname:
                 likes_map[pid].append(uname)
 
-        # تجميع التعليقات لكل منشور
         comments_map = {}
         for c in comments:
             pid = c['post_id']
@@ -521,19 +806,15 @@ def like():
             return jsonify({"success": False, "message": "المستخدم غير موجود"}), 404
         user_id = user_res.data[0]['id']
 
-        # التحقق إن كان المستخدم وضع لايك مسبقاً
         existing_like = supabase.table('likes').select('id').eq('user_id', user_id).eq('post_id', post_id).execute()
 
         if existing_like.data and len(existing_like.data) > 0:
-            # إزالة اللايك
             supabase.table('likes').delete().eq('user_id', user_id).eq('post_id', post_id).execute()
             liked = False
         else:
-            # إضافة لايك جديد
             supabase.table('likes').insert({'user_id': user_id, 'post_id': post_id}).execute()
             liked = True
 
-        # حساب إجمالي اللايكات للمنشور
         count_res = supabase.table('likes').select('id', count='exact').eq('post_id', post_id).execute()
         new_count = count_res.count if count_res.count is not None else len(count_res.data)
 
@@ -558,14 +839,12 @@ def add_comment():
             return jsonify({"success": False, "message": "المستخدم غير موجود"}), 404
         user_id = user_res.data[0]['id']
 
-        # إضافة التعليق
         supabase.table('comments').insert({
             'user_id': user_id,
             'post_id': post_id,
             'content': content
         }).execute()
 
-        # جلب قائمة التعليقات المحدثة
         comments_res = supabase.table('comments').select('id, content, created_at, accounts(username)').eq('post_id', post_id).order('created_at', desc=False).execute()
         
         formatted_comments = []
@@ -582,6 +861,130 @@ def add_comment():
     except Exception as e:
         print("Comment Error:", e)
         return jsonify({"success": False, "message": str(e)}), 500
+
+# -------------------------------------------------------------
+# مسارات نظام الرسائل الخاصة الجديدة
+# -------------------------------------------------------------
+
+@app.route('/search_users', methods=['POST'])
+def search_users():
+    data = request.json or {}
+    query = data.get('query', '').strip()
+    current_username = data.get('username', '').strip()
+
+    if not query or not supabase:
+        return jsonify([])
+
+    try:
+        # البحث في جدول accounts باستثناء الحساب الحالي
+        res = supabase.table('accounts').select('id, username')\
+            .ilike('username', f'%{query}%')\
+            .neq('username', current_username)\
+            .limit(10).execute()
+        return jsonify(res.data or [])
+    except Exception as e:
+        print("Search Users Error:", e)
+        return jsonify([])
+
+@app.route('/create_or_get_conversation', methods=['POST'])
+def create_or_get_conversation():
+    data = request.json or {}
+    username = data.get('username', '').strip()
+    target_username = data.get('target_username', '').strip()
+
+    if not username or not target_username or username == target_username or not supabase:
+        return jsonify({'success': False, 'message': 'طلب غير صالح'}), 400
+
+    try:
+        u1_res = supabase.table('accounts').select('id').eq('username', username).execute()
+        u2_res = supabase.table('accounts').select('id').eq('username', target_username).execute()
+
+        if not u1_res.data or not u2_res.data:
+            return jsonify({'success': False, 'message': 'المستخدم غير موجود'}), 404
+
+        u1_id = u1_res.data[0]['id']
+        u2_id = u2_res.data[0]['id']
+
+        # البحث عن محادثة سابقة بالاتجاهين
+        conv1 = supabase.table('conversations').select('id')\
+            .eq('user1_id', u1_id).eq('user2_id', u2_id).execute()
+        
+        if conv1.data and len(conv1.data) > 0:
+            return jsonify({'success': True, 'conversation_id': conv1.data[0]['id']})
+
+        conv2 = supabase.table('conversations').select('id')\
+            .eq('user1_id', u2_id).eq('user2_id', u1_id).execute()
+
+        if conv2.data and len(conv2.data) > 0:
+            return jsonify({'success': True, 'conversation_id': conv2.data[0]['id']})
+
+        # إنشاء محادثة جديدة إذا لم تكن موجودة
+        new_conv = supabase.table('conversations').insert({
+            'user1_id': u1_id,
+            'user2_id': u2_id
+        }).execute()
+
+        return jsonify({'success': True, 'conversation_id': new_conv.data[0]['id']})
+    except Exception as e:
+        print("Conversation Error:", e)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/get_messages', methods=['POST'])
+def get_messages():
+    data = request.json or {}
+    conversation_id = data.get('conversation_id')
+
+    if not conversation_id or not supabase:
+        return jsonify([])
+
+    try:
+        res = supabase.table('messages')\
+            .select('id, conversation_id, sender_id, content, created_at, accounts(username)')\
+            .eq('conversation_id', conversation_id)\
+            .order('created_at', desc=False).execute()
+
+        messages = []
+        for m in res.data or []:
+            uname = m.get('accounts', {}).get('username') if isinstance(m.get('accounts'), dict) else 'مستخدم'
+            messages.append({
+                'id': m['id'],
+                'sender_id': m['sender_id'],
+                'sender_username': uname,
+                'content': m['content'],
+                'created_at': m.get('created_at')
+            })
+
+        return jsonify(messages)
+    except Exception as e:
+        print("Get Messages Error:", e)
+        return jsonify([])
+
+@app.route('/send_message', methods=['POST'])
+def send_message():
+    data = request.json or {}
+    conversation_id = data.get('conversation_id')
+    username = data.get('username')
+    content = data.get('content', '').strip()
+
+    if not conversation_id or not username or not content or not supabase:
+        return jsonify({'success': False, 'message': 'بيانات ناقصة'}), 400
+
+    try:
+        user_res = supabase.table('accounts').select('id').eq('username', username).execute()
+        if not user_res.data:
+            return jsonify({'success': False, 'message': 'المستخدم غير موجود'}), 404
+        sender_id = user_res.data[0]['id']
+
+        supabase.table('messages').insert({
+            'conversation_id': conversation_id,
+            'sender_id': sender_id,
+            'content': content
+        }).execute()
+
+        return jsonify({'success': True})
+    except Exception as e:
+        print("Send Message Error:", e)
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
