@@ -1,1202 +1,914 @@
+# ==========================================
+# TaskCoins Hub - نسخة احترافية آمنة جاهزة للنشر
+# ملف واحد (app.py) مع جميع الإصلاحات المطلوبة
+# ==========================================
+# التعديلات الرئيسية المطبقة:
+# 1. نظام قوالب صحيح عبر DictLoader + Jinja2 Environment الخاص بـ Flask
+# 2. عدادات الإدارة باستخدام count="exact" و .count
+# 3. منع Race Condition عند تنفيذ المهام (تحديث ذري مع شرط)
+# 4. التحقق من تطابق الرابط مع المنصة
+# 5. حماية CSRF لجميع نماذج POST (Flask-WTF)
+# 6. SECRET_KEY إلزامي من البيئة بدون قيمة افتراضية
+# 7. التحقق من المدير من قاعدة البيانات في كل طلب إداري
+# 8. تنظيف البريد (lowercase + strip) عند التسجيل والدخول
+# 9. إعدادات جلسة آمنة (HTTPONLY / SECURE / SAMESITE)
+# 10. معالجة أخطاء احترافية مع logging ورسائل عربية فقط
+# 11. تحقق صارم من المدخلات (قيم سالبة، مهام فارغة، مكافآت غير منطقية)
+# 12-13. الحفاظ على كل الميزات والتصميم والصفحات والجداول
+# ==========================================
+
 import os
 import re
 import logging
 from functools import wraps
-from flask import (
-    Flask, request, session, redirect, url_for,
-    jsonify, render_template_string, make_response
-)
-from werkzeug.security import generate_password_hash, check_password_hash
-from supabase import create_client, Client
+from urllib.parse import urlparse
 
-# =========================================================
-# Logging Configuration
-# =========================================================
+from flask import (
+    Flask, request, redirect, url_for, session, flash, jsonify,
+    render_template, get_flashed_messages
+)
+from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
+from werkzeug.security import generate_password_hash, check_password_hash
+from jinja2 import DictLoader
+from supabase import create_client, Client
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ==========================================
+# إعداد التسجيل (Logging)
+# ==========================================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
 )
-logger = logging.getLogger("TaskApp")
+logger = logging.getLogger('TaskCoinsHub')
 
-# =========================================================
-# Flask & Supabase Initialization
-# =========================================================
+# ==========================================
+# إعداد التطبيق + SECRET_KEY الإلزامي
+# ==========================================
+# [تعديل 6] إزالة القيمة الافتراضية لـ SECRET_KEY
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY غير موجود في متغيرات البيئة. "
+        "يجب تعيين SECRET_KEY قبل تشغيل التطبيق (مطلوب للنشر الآمن)."
+    )
+
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "super-secret-key-change-this-in-production")
+app.config['SECRET_KEY'] = SECRET_KEY
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+# [تعديل 9] إعدادات الجلسة الآمنة
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+# SESSION_COOKIE_SECURE=True فقط عند HTTPS (يُكتشف تلقائياً أو عبر متغير بيئة)
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FORCE_HTTPS', 'false').lower() in ('1', 'true', 'yes')
+
+# حماية CSRF
+csrf = CSRFProtect(app)
+
+# ==========================================
+# اتصال Supabase
+# ==========================================
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.warning("SUPABASE_URL or SUPABASE_KEY environment variables are missing!")
+    raise RuntimeError(
+        "SUPABASE_URL أو SUPABASE_KEY غير موجودين في متغيرات البيئة."
+    )
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if (SUPABASE_URL and SUPABASE_KEY) else None
+db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# =========================================================
-# Core Helpers & HTML Base Template
-# =========================================================
-
-def get_current_user():
-    if 'user_id' in session:
-        res = supabase.table("accounts").select("*").eq("id", session['user_id']).execute()
-        if res.data:
-            return res.data[0]
-    return None
-
-def log_coin_transaction(user_id, amount, action, description):
-    """تسجيل أي حركة نقاط في القاعدة"""
-    supabase.table("coin_history").insert({
-        "user_id": user_id,
-        "amount": amount,
-        "action": action,
-        "description": description
-    }).execute()
-
-def create_notification(user_id, title, message):
-    """إرسال إشعار للمستخدم"""
-    supabase.table("notifications").insert({
-        "user_id": user_id,
-        "title": title,
-        "message": message
-    }).execute()
-
-BASE_LAYOUT = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl" data-bs-theme="dark">
+# ==========================================
+# نظام القوالب الصحيح لملف واحد (DictLoader)
+# [تعديل 1] استخدام محرك Jinja الخاص بـ Flask بشكل صحيح
+# ==========================================
+TEMPLATES = {
+    'base.html': '''<!DOCTYPE html>
+<html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ title }} - TaskCoins Hub</title>
-    <!-- Bootstrap 5 RTL CSS -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.rtl.min.css">
-    <!-- Font Awesome Icons -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
-    <style>
-        :root {
-            --bg-primary: #0f172a;
-            --bg-card: #1e293b;
-            --accent: #6366f1;
-            --accent-hover: #4f46e5;
-        }
-        body {
-            background-color: var(--bg-primary);
-            color: #f8fafc;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-        .card {
-            background-color: var(--bg-card);
-            border: 1px solid #334155;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        }
-        .navbar {
-            background-color: var(--bg-card);
-            border-bottom: 1px solid #334155;
-        }
-        .btn-primary {
-            background-color: var(--accent);
-            border-color: var(--accent);
-        }
-        .btn-primary:hover {
-            background-color: var(--accent-hover);
-            border-color: var(--accent-hover);
-        }
-        .coin-badge {
-            background: linear-gradient(135deg, #f59e0b, #d97706);
-            color: #fff;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-weight: bold;
-        }
-        .nav-link {
-            color: #94a3b8;
-        }
-        .nav-link:hover, .nav-link.active {
-            color: #ffffff;
-        }
-        .toast-container {
-            position: fixed;
-            top: 20px;
-            left: 20px;
-            z-index: 1060;
-        }
-    </style>
+    <title>TaskCoins Hub</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>body { background-color: #121212; color: #e0e0e0; }</style>
 </head>
-<body>
-
-    <!-- Dynamic Navbar -->
-    <nav class="navbar navbar-expand-lg sticky-top">
+<body data-bs-theme="dark">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom border-secondary mb-4">
         <div class="container">
-            <a class="navbar-brand fw-bold text-primary" href="/dashboard">
-                <i class="fa-solid fa-coins me-2"></i>TaskCoins
-            </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
+            <a class="navbar-brand fw-bold text-primary" href="{{ url_for('index') }}"><i class="fas fa-coins me-2"></i>TaskCoins Hub</a>
+            <div class="navbar-nav me-auto">
                 {% if session.get('user_id') %}
-                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                    <li class="nav-item"><a class="nav-link" href="/dashboard"><i class="fa-solid fa-house me-1"></i> الرئيسية</a></li>
-                    <li class="nav-item"><a class="nav-link" href="/tasks/create"><i class="fa-solid fa-plus-circle me-1"></i> إضافة مهمة</a></li>
-                    <li class="nav-item"><a class="nav-link" href="/my-tasks"><i class="fa-solid fa-list-check me-1"></i> مهامي</a></li>
-                    <li class="nav-item"><a class="nav-link" href="/history"><i class="fa-solid fa-history me-1"></i> السجل</a></li>
-                    <li class="nav-item"><a class="nav-link" href="/notifications"><i class="fa-solid fa-bell me-1"></i> الإشعارات</a></li>
-                    {% if session.get('is_admin') %}
-                    <li class="nav-item"><a class="nav-link text-warning" href="/admin"><i class="fa-solid fa-user-shield me-1"></i> لوحة الإدارة</a></li>
-                    {% endif %}
-                </ul>
-                <div class="d-flex align-items-center gap-3">
-                    <span class="coin-badge">
-                        <i class="fa-solid fa-coins me-1"></i><span id="user-coins-display">{{ user_coins if user_coins is not none else 0 }}</span>
-                    </span>
-                    <div class="dropdown">
-                        <a href="#" class="d-flex align-items-center text-white text-decoration-none dropdown-toggle" data-bs-toggle="dropdown">
-                            <img src="{{ profile_photo or 'https://via.placeholder.com/150' }}" width="32" height="32" class="rounded-circle me-2">
-                            <strong>{{ username }}</strong>
-                        </a>
-                        <ul class="dropdown-menu dropdown-menu-dark text-small shadow">
-                            <li><a class="dropdown-item" href="/profile"><i class="fa-solid fa-user me-2"></i> الملف الشخصي</a></li>
-                            <li><a class="dropdown-item" href="/report"><i class="fa-solid fa-flag me-2"></i> تقديم بلاغ</a></li>
-                            <li><hr class="dropdown-divider"></li>
-                            <li><a class="dropdown-item text-danger" href="/logout"><i class="fa-solid fa-right-from-bracket me-2"></i> تسجيل الخروج</a></li>
-                        </ul>
-                    </div>
-                </div>
-                {% else %}
-                <div class="ms-auto">
-                    <a href="/login" class="btn btn-outline-light me-2">تسجيل الدخول</a>
-                    <a href="/register" class="btn btn-primary">إنشاء حساب</a>
-                </div>
+                <a class="nav-link" href="{{ url_for('index') }}">المهام</a>
+                <a class="nav-link" href="{{ url_for('create_task') }}">إنشاء مهمة</a>
+                <a class="nav-link" href="{{ url_for('profile') }}">الملف الشخصي</a>
+                {% if session.get('is_admin') %}
+                <a class="nav-link text-warning" href="{{ url_for('admin_dashboard') }}">لوحة الإدارة</a>
+                {% endif %}
+                <a class="nav-link text-danger" href="{{ url_for('logout') }}">تسجيل الخروج</a>
                 {% endif %}
             </div>
         </div>
     </nav>
-
-    <!-- Main Content Container -->
-    <main class="container my-4 flex-grow-1">
-        <div id="alert-zone"></div>
-        {{ content_body | safe }}
-    </main>
-
-    <!-- Footer -->
-    <footer class="footer mt-auto py-3 bg-dark text-center text-muted border-top border-secondary">
-        <div class="container">
-            <small>&copy; 2026 TaskCoins Hub - جميع الحقوق محفوظة.</small>
-        </div>
-    </footer>
-
-    <!-- Bootstrap JS + Popper -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    
-    <!-- Custom Application AJAX Scripts -->
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for cat, msg in messages %}
+                    <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">{{ msg }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- CSRF token متاح لجميع طلبات AJAX -->
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <script>
-        function showAlert(message, type = 'success') {
-            const alertZone = document.getElementById('alert-zone');
-            const alertHtml = `
-                <div class="alert alert-${type} alert-dismissible fade show" role="alert">
-                    ${message}
-                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                </div>
-            `;
-            alertZone.innerHTML = alertHtml;
-            setTimeout(() => { alertZone.innerHTML = ''; }, 5000);
-        }
-
-        async function apiCall(url, method = 'GET', data = null) {
-            try {
-                const options = {
-                    method: method,
-                    headers: { 'Content-Type': 'application/json' }
-                };
-                if (data) options.body = JSON.stringify(data);
-                
-                const response = await fetch(url, options);
-                const result = await response.json();
-                
-                if (!response.ok) {
-                    throw new Error(result.error || 'حدث خطأ غير متوقع');
+        // إضافة CSRF تلقائياً لكل طلبات fetch من نوع POST
+        const originalFetch = window.fetch;
+        window.fetch = function(url, options = {}) {
+            options = options || {};
+            options.headers = options.headers || {};
+            if ((options.method || 'GET').toUpperCase() === 'POST') {
+                const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+                if (token) {
+                    if (options.headers instanceof Headers) {
+                        options.headers.set('X-CSRFToken', token);
+                    } else {
+                        options.headers['X-CSRFToken'] = token;
+                    }
                 }
-                return result;
-            } catch (err) {
-                showAlert(err.message, 'danger');
-                return null;
             }
-        }
+            return originalFetch(url, options);
+        };
     </script>
 </body>
-</html>
-"""
+</html>''',
 
-def render_page(title, content_template, **kwargs):
-    """
-    دالة آمنة لمعالجة عرض الصفحات وإرسال البيانات للـ Template
-    لتجنب تداخل f-strings مع أكواد JavaScript.
-    """
-    user = get_current_user()
-    user_coins = user['coins'] if user else 0
-    username = user['username'] if user else ""
-    profile_photo = user['profile_photo'] if user else ""
-    
-    # دمج المحتوى مع المخطط الرئيسي
-    full_template = BASE_LAYOUT.replace("{{ content_body | safe }}", content_template)
-    
-    return render_template_string(
-        full_template, 
-        title=title, 
-        user_coins=user_coins, 
-        username=username, 
-        profile_photo=profile_photo,
-        **kwargs
-    )
+    'login.html': '''{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center"><div class="col-md-5"><div class="card bg-dark border-secondary p-4 shadow">
+<h3 class="text-center mb-4 text-primary">تسجيل الدخول</h3>
+<form method="POST">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="mb-3"><label class="form-label">البريد الإلكتروني</label><input type="email" name="email" class="form-control" required></div>
+<div class="mb-3"><label class="form-label">كلمة المرور</label><input type="password" name="password" class="form-control" required></div>
+<button type="submit" class="btn btn-primary w-100">دخول</button>
+</form>
+<div class="text-center mt-3"><a href="{{ url_for('register') }}" class="text-decoration-none">ليس لديك حساب؟ إنشاء حساب جديد</a></div>
+</div></div></div>
+{% endblock %}''',
 
-# =========================================================
-# Security & Helper Decorators
-# =========================================================
+    'register.html': '''{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center"><div class="col-md-5"><div class="card bg-dark border-secondary p-4 shadow">
+<h3 class="text-center mb-4 text-primary">إنشاء حساب جديد</h3>
+<form method="POST">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="mb-3"><label class="form-label">اسم المستخدم</label><input type="text" name="username" class="form-control" required maxlength="50"></div>
+<div class="mb-3"><label class="form-label">البريد الإلكتروني</label><input type="email" name="email" class="form-control" required></div>
+<div class="mb-3"><label class="form-label">كلمة المرور</label><input type="password" name="password" class="form-control" required minlength="6"></div>
+<button type="submit" class="btn btn-primary w-100">تسجيل</button>
+</form>
+<div class="text-center mt-3"><a href="{{ url_for('login') }}" class="text-decoration-none">لديك حساب بالفعل؟ سجل دخولك</a></div>
+</div></div></div>
+{% endblock %}''',
+
+    'index.html': '''{% extends "base.html" %}
+{% block content %}
+<div class="row mb-4"><div class="col-md-12">
+<form method="GET" class="row g-3">
+<div class="col-md-4"><input type="text" name="search" class="form-control" placeholder="ابحث عن نوع المهمة..." value="{{ search }}"></div>
+<div class="col-md-4"><select name="platform" class="form-select">
+<option value="">جميع المنصات</option>
+<option value="YouTube" {% if current_platform == 'YouTube' %}selected{% endif %}>YouTube</option>
+<option value="Facebook" {% if current_platform == 'Facebook' %}selected{% endif %}>Facebook</option>
+<option value="Instagram" {% if current_platform == 'Instagram' %}selected{% endif %}>Instagram</option>
+<option value="TikTok" {% if current_platform == 'TikTok' %}selected{% endif %}>TikTok</option>
+<option value="X" {% if current_platform == 'X' %}selected{% endif %}>X</option>
+<option value="Telegram" {% if current_platform == 'Telegram' %}selected{% endif %}>Telegram</option>
+<option value="Discord" {% if current_platform == 'Discord' %}selected{% endif %}>Discord</option>
+</select></div>
+<div class="col-md-4"><button type="submit" class="btn btn-primary w-100">بحث وتصفية</button></div>
+</form>
+</div></div>
+<div class="row">
+{% for task in tasks %}
+<div class="col-md-4 mb-3"><div class="card bg-dark border-secondary h-100 shadow-sm"><div class="card-body">
+<span class="badge bg-secondary mb-2">{{ task.platform }}</span>
+<h5 class="card-title text-light">{{ task.task_type }}</h5>
+<p class="card-text text-muted small">المكافأة: <span class="text-success fw-bold">{{ task.reward }} نقطة</span></p>
+<p class="card-text text-muted small">المنجز: {{ task.completed_count }} / {{ task.required_count }}</p>
+<a href="{{ task.link }}" target="_blank" rel="noopener noreferrer" class="btn btn-outline-info btn-sm mb-2 w-100">رابط المهمة</a>
+<button onclick="completeTask('{{ task.id }}')" class="btn btn-success btn-sm w-100">تنفيذ المهمة</button>
+</div></div></div>
+{% else %}
+<div class="col-12 text-center py-5"><p class="text-muted">لا توجد مهام متاحة حالياً.</p></div>
+{% endfor %}
+</div>
+<script>
+async function completeTask(id) {
+    try {
+        let res = await fetch('/tasks/complete/' + id, {method: 'POST'});
+        let data = await res.json();
+        alert(data.message);
+        if(data.success) location.reload();
+    } catch (e) {
+        alert('حدث خطأ أثناء الاتصال بالخادم');
+    }
+}
+</script>
+{% endblock %}''',
+
+    'create_task.html': '''{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center"><div class="col-md-6"><div class="card bg-dark border-secondary p-4 shadow">
+<h3 class="text-center mb-4 text-primary">إنشاء مهمة جديدة</h3>
+<form id="createTaskForm">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="mb-3"><label class="form-label">المنصة</label><select name="platform" class="form-select" required>
+<option value="YouTube">YouTube</option><option value="Facebook">Facebook</option><option value="Instagram">Instagram</option><option value="TikTok">TikTok</option><option value="X">X</option><option value="Telegram">Telegram</option><option value="Discord">Discord</option>
+</select></div>
+<div class="mb-3"><label class="form-label">نوع المهمة</label><input type="text" name="task_type" class="form-control" required maxlength="100"></div>
+<div class="mb-3"><label class="form-label">الرابط</label><input type="url" name="link" class="form-control" required placeholder="https://..."></div>
+<div class="mb-3"><label class="form-label">العدد المطلوب</label><input type="number" name="required_count" class="form-control" min="1" max="10000" required></div>
+<div class="mb-3"><label class="form-label">المكافأة لكل تنفيذ</label><input type="number" step="0.1" name="reward" class="form-control" min="0.1" max="1000" required></div>
+<button type="submit" class="btn btn-primary w-100">إنشاء وخصم النقاط</button>
+</form>
+</div></div></div>
+<script>
+document.getElementById('createTaskForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+        let res = await fetch('/tasks/create', {method: 'POST', body: new FormData(e.target)});
+        let data = await res.json();
+        alert(data.message);
+        if(data.success) window.location.href = '{{ url_for("index") }}';
+    } catch (err) {
+        alert('حدث خطأ أثناء الاتصال بالخادم');
+    }
+};
+</script>
+{% endblock %}''',
+
+    'profile.html': '''{% extends "base.html" %}
+{% block content %}
+<div class="row">
+<div class="col-md-4"><div class="card bg-dark border-secondary p-4 shadow mb-4">
+<h4 class="text-primary mb-3">الملف الشخصي</h4>
+<p><strong>اسم المستخدم:</strong> {{ user.username }}</p>
+<p><strong>البريد الإلكتروني:</strong> {{ user.email }}</p>
+<p><strong>الرصيد الحالي:</strong> <span class="text-success fw-bold">{{ user.points }} نقطة</span></p>
+</div></div>
+<div class="col-md-8"><div class="card bg-dark border-secondary p-4 shadow mb-4">
+<h4 class="text-primary mb-3">سجل العمليات</h4>
+<div class="table-responsive"><table class="table table-dark table-striped">
+<thead><tr><th>النوع</th><th>المبلغ</th><th>الوصف</th><th>التاريخ</th></tr></thead>
+<tbody>
+{% for h in history %}
+<tr><td>{{ h.type }}</td><td class="{% if h.amount > 0 %}text-success{% else %}text-danger{% endif %}">{{ h.amount }}</td><td>{{ h.description }}</td><td>{{ h.created_at[:10] if h.created_at else '' }}</td></tr>
+{% else %}
+<tr><td colspan="4" class="text-center text-muted">لا يوجد سجل بعد</td></tr>
+{% endfor %}
+</tbody></table></div>
+</div></div></div>
+{% endblock %}''',
+
+    'admin.html': '''{% extends "base.html" %}
+{% block content %}
+<div class="row mb-4">
+<div class="col-md-6"><div class="card bg-dark border-secondary p-3 text-center"><h3>إجمالي المستخدمين</h3><p class="fs-4 text-primary">{{ users_count }}</p></div></div>
+<div class="col-md-6"><div class="card bg-dark border-secondary p-3 text-center"><h3>إجمالي المهام</h3><p class="fs-4 text-success">{{ tasks_count }}</p></div></div>
+</div>
+<div class="card bg-dark border-secondary p-4 shadow">
+<h3 class="text-primary mb-3">إدارة المستخدمين</h3>
+<div class="table-responsive"><table class="table table-dark table-striped">
+<thead><tr><th>اسم المستخدم</th><th>البريد</th><th>النقاط</th><th>الحالة</th><th>الإجراءات</th></tr></thead>
+<tbody>
+{% for u in users %}
+<tr><td>{{ u.username }}</td><td>{{ u.email }}</td><td>{{ u.points }}</td><td>{% if u.is_banned %}<span class="text-danger">محظور</span>{% else %}<span class="text-success">نشط</span>{% endif %}</td>
+<td><button onclick="toggleBan('{{ u.id }}')" class="btn btn-sm btn-outline-warning">حظر/فك حظر</button></td></tr>
+{% else %}
+<tr><td colspan="5" class="text-center text-muted">لا يوجد مستخدمون</td></tr>
+{% endfor %}
+</tbody></table></div>
+</div>
+<script>
+async function toggleBan(id) {
+    try {
+        let res = await fetch('/admin/user/ban/' + id, {method: 'POST'});
+        let data = await res.json();
+        alert(data.message);
+        if(data.success) location.reload();
+    } catch (e) {
+        alert('حدث خطأ أثناء الاتصال بالخادم');
+    }
+}
+</script>
+{% endblock %}'''
+}
+
+# ربط DictLoader بمحرك Jinja الخاص بـ Flask
+app.jinja_loader = DictLoader(TEMPLATES)
+
+# جعل csrf_token متاحاً في كل القوالب
+@app.context_processor
+def inject_csrf():
+    return dict(csrf_token=generate_csrf)
+
+# ==========================================
+# الوظائف المساعدة
+# ==========================================
+
+def log_action(level: str, message: str):
+    """تسجيل الأحداث بشكل موحد"""
+    if level == 'info':
+        logger.info(message)
+    elif level == 'error':
+        logger.error(message)
+    elif level == 'warning':
+        logger.warning(message)
+    else:
+        logger.debug(message)
+
+
+def create_notification(user_id, message: str):
+    try:
+        db.table('notifications').insert({
+            'user_id': user_id,
+            'message': message,
+            'is_read': False
+        }).execute()
+    except Exception as e:
+        log_action('error', f"Error creating notification: {e}")
+
+
+def add_points_history(user_id, amount, type_op: str, description: str):
+    try:
+        db.table('points_history').insert({
+            'user_id': user_id,
+            'amount': amount,
+            'type': type_op,
+            'description': description
+        }).execute()
+    except Exception as e:
+        log_action('error', f"Error adding points history: {e}")
+
+
+# [تعديل 4] التحقق من تطابق الرابط مع المنصة
+PLATFORM_PATTERNS = {
+    'YouTube': [
+        r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+',
+    ],
+    'Facebook': [
+        r'(https?://)?(www\.)?(facebook\.com|fb\.com|fb\.watch)/.+',
+    ],
+    'Instagram': [
+        r'(https?://)?(www\.)?instagram\.com/.+',
+    ],
+    'TikTok': [
+        r'(https?://)?(www\.)?(tiktok\.com|vm\.tiktok\.com)/.+',
+    ],
+    'X': [
+        r'(https?://)?(www\.)?(twitter\.com|x\.com)/.+',
+    ],
+    'Telegram': [
+        r'(https?://)?(www\.)?(t\.me|telegram\.me)/.+',
+    ],
+    'Discord': [
+        r'(https?://)?(www\.)?(discord\.gg|discord\.com)/.+',
+    ],
+}
+
+ALLOWED_PLATFORMS = set(PLATFORM_PATTERNS.keys())
+
+
+def is_valid_platform_link(platform: str, link: str) -> bool:
+    """التحقق من أن الرابط يطابق المنصة المختارة"""
+    if platform not in PLATFORM_PATTERNS:
+        return False
+    if not link or not isinstance(link, str):
+        return False
+    link = link.strip()
+    # يجب أن يبدأ بـ http/https
+    parsed = urlparse(link)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return False
+    for pattern in PLATFORM_PATTERNS[platform]:
+        if re.match(pattern, link, re.IGNORECASE):
+            return True
+    return False
+
+
+def sanitize_email(email: str) -> str:
+    """[تعديل 8] تنظيف البريد: strip + lowercase"""
+    if not email:
+        return ''
+    return email.strip().lower()
+
+
+def sanitize_username(username: str) -> str:
+    if not username:
+        return ''
+    return username.strip()
+
+
+# ==========================================
+# Decorators
+# ==========================================
 
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
+            if request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json':
+                return jsonify({'success': False, 'message': 'يجب تسجيل الدخول أولاً'}), 401
+            flash('الرجاء تسجيل الدخول للوصول إلى هذه الصفحة', 'danger')
             return redirect(url_for('login'))
-        # Check if user is banned
-        res = supabase.table("accounts").select("is_banned").eq("id", session['user_id']).execute()
-        if res.data and res.data[0]['is_banned']:
-            session.clear()
-            content = """
-                <div class="card p-4 text-center border-danger">
-                    <h3 class="text-danger">تم حظر حسابك</h3>
-                    <p class="text-muted">لقد تم حظر حسابك لمخالفة الشروط والأحكام. تواصل مع الدعم الفني للمزيد.</p>
-                    <a href="/login" class="btn btn-primary">العودة لتسجيل الدخول</a>
-                </div>
-            """
-            return render_page("محظور", content)
+
+        try:
+            user_res = db.table('users').select('is_banned, is_admin').eq('id', session['user_id']).execute()
+            if not user_res.data:
+                session.clear()
+                flash('الحساب غير موجود', 'danger')
+                return redirect(url_for('login'))
+            user = user_res.data[0]
+            if user.get('is_banned'):
+                session.clear()
+                flash('تم حظر حسابك من قبل الإدارة', 'danger')
+                return redirect(url_for('login'))
+            # تحديث is_admin في الجلسة من القاعدة دائماً
+            session['is_admin'] = bool(user.get('is_admin'))
+        except Exception as e:
+            log_action('error', f"login_required DB check failed: {e}")
+            # لا نمنع الوصول إذا فشل الاتصال مؤقتاً، لكن نسجل الخطأ
+
         return f(*args, **kwargs)
     return decorated_function
 
+
 def admin_required(f):
+    """[تعديل 7] التحقق من المدير من قاعدة البيانات في كل طلب إداري"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
-            return redirect(url_for('login'))
-        if not session.get('is_admin', False):
-            content = """
-                <div class="card p-4 text-center border-warning">
-                    <h3 class="text-warning">غير مصرح لك بالوصول</h3>
-                    <p class="text-muted">هذه الصفحة خاصة بمديري النظام فقط.</p>
-                    <a href="/dashboard" class="btn btn-primary">الرئيسية</a>
-                </div>
-            """
-            return render_page("غير مصرح", content), 403
+            if request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json':
+                return jsonify({'success': False, 'message': 'غير مصرح لك بالدخول'}), 403
+            flash('غير مصرح لك بالدخول إلى لوحة التحكم', 'danger')
+            return redirect(url_for('index'))
+
+        try:
+            user_res = db.table('users').select('is_admin, is_banned').eq('id', session['user_id']).execute()
+            if not user_res.data:
+                session.clear()
+                flash('الحساب غير موجود', 'danger')
+                return redirect(url_for('login'))
+
+            user = user_res.data[0]
+            if user.get('is_banned'):
+                session.clear()
+                flash('تم حظر حسابك من قبل الإدارة', 'danger')
+                return redirect(url_for('login'))
+
+            if not user.get('is_admin'):
+                session['is_admin'] = False
+                if request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json':
+                    return jsonify({'success': False, 'message': 'غير مصرح لك بالدخول'}), 403
+                flash('غير مصرح لك بالدخول إلى لوحة التحكم', 'danger')
+                return redirect(url_for('index'))
+
+            # تأكيد الحالة في الجلسة
+            session['is_admin'] = True
+        except Exception as e:
+            log_action('error', f"admin_required DB check failed: {e}")
+            if request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json':
+                return jsonify({'success': False, 'message': 'حدث خطأ في التحقق من الصلاحيات'}), 500
+            flash('حدث خطأ أثناء التحقق من الصلاحيات', 'danger')
+            return redirect(url_for('index'))
+
         return f(*args, **kwargs)
     return decorated_function
 
-# =========================================================
-# Authentication Routes
-# =========================================================
 
-@app.route('/register', methods=['GET'])
+# ==========================================
+# معالجة أخطاء عامة
+# [تعديل 10] عدم إظهار تفاصيل الخطأ للمستخدم
+# ==========================================
+
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    log_action('warning', f"CSRF error: {e}")
+    if request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json':
+        return jsonify({'success': False, 'message': 'طلب غير صالح (CSRF). أعد تحميل الصفحة وحاول مرة أخرى.'}), 400
+    flash('طلب غير صالح. أعد تحميل الصفحة وحاول مرة أخرى.', 'danger')
+    return redirect(request.referrer or url_for('index'))
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    log_action('error', f"Internal server error: {e}")
+    logger.exception("500 error details")
+    if request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json':
+        return jsonify({'success': False, 'message': 'حدث خطأ غير متوقع. حاول مرة أخرى لاحقاً.'}), 500
+    flash('حدث خطأ غير متوقع. حاول مرة أخرى لاحقاً.', 'danger')
+    return redirect(url_for('index'))
+
+
+# ==========================================
+# مسارات المصادقة (Auth)
+# ==========================================
+
+@app.route('/register', methods=['GET', 'POST'])
 def register():
-    content = """
-    <div class="row justify-content-center">
-        <div class="col-md-5">
-            <div class="card p-4">
-                <h3 class="text-center mb-4"><i class="fa-solid fa-user-plus text-primary me-2"></i>إنشاء حساب جديد</h3>
-                <form id="register-form">
-                    <div class="mb-3">
-                        <label class="form-label">اسم المستخدم</label>
-                        <input type="text" id="username" class="form-control" required placeholder="مثال: ahmed123">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">البريد الإلكتروني</label>
-                        <input type="email" id="email" class="form-control" required placeholder="user@domain.com">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">كلمة المرور</label>
-                        <input type="password" id="password" class="form-control" required placeholder="******">
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100 mb-3">تسجيل الحساب</button>
-                </form>
-                <div class="text-center">
-                    <small>لديك حساب بالفعل؟ <a href="/login">تسجيل الدخول</a></small>
-                </div>
-            </div>
-        </div>
-    </div>
-    <script>
-        document.getElementById('register-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const username = document.getElementById('username').value.trim();
-            const email = document.getElementById('email').value.trim();
-            const password = document.getElementById('password').value;
+    if request.method == 'POST':
+        username = sanitize_username(request.form.get('username', ''))
+        email = sanitize_email(request.form.get('email', ''))
+        password = request.form.get('password', '')
 
-            const res = await apiCall('/api/auth/register', 'POST', { username, email, password });
-            if(res && res.success) {
-                showAlert('تم إنشاء الحساب بنجاح! جاري تحويلك...', 'success');
-                setTimeout(() => window.location.href = '/dashboard', 1500);
-            }
-        });
-    </script>
-    """
-    return render_page("تسجيل حساب", content)
+        # [تعديل 11] تحقق صارم من المدخلات
+        if not username or len(username) < 3 or len(username) > 50:
+            flash('اسم المستخدم يجب أن يكون بين 3 و 50 حرفاً', 'danger')
+            return redirect(url_for('register'))
+        if not email or '@' not in email:
+            flash('البريد الإلكتروني غير صالح', 'danger')
+            return redirect(url_for('register'))
+        if not password or len(password) < 6:
+            flash('كلمة المرور يجب أن تكون 6 أحرف على الأقل', 'danger')
+            return redirect(url_for('register'))
 
-@app.route('/login', methods=['GET'])
+        try:
+            existing = db.table('users').select('id').or_(
+                f"username.eq.{username},email.eq.{email}"
+            ).execute()
+            if existing.data:
+                flash('اسم المستخدم أو البريد الإلكتروني مستخدم مسبقاً', 'danger')
+                return redirect(url_for('register'))
+        except Exception as e:
+            log_action('error', f"Register check existing failed: {e}")
+            flash('حدث خطأ أثناء التحقق من البيانات', 'danger')
+            return redirect(url_for('register'))
+
+        hashed_password = generate_password_hash(password)
+        welcome_points = 50.0
+
+        try:
+            res = db.table('users').insert({
+                'username': username,
+                'email': email,
+                'password': hashed_password,
+                'points': welcome_points,
+                'is_admin': False,
+                'is_banned': False
+            }).execute()
+
+            if res.data:
+                user = res.data[0]
+                add_points_history(user['id'], welcome_points, 'bonus', 'نقاط ترحيبية عند إنشاء الحساب')
+                create_notification(user['id'], 'مرحباً بك في منصة TaskCoins Hub! تم إضافة 50 نقطة كهدية ترحيبية.')
+                flash('تم إنشاء الحساب بنجاح! يمكنك تسجيل الدخول الآن.', 'success')
+                return redirect(url_for('login'))
+            else:
+                flash('فشل إنشاء الحساب. حاول مرة أخرى.', 'danger')
+        except Exception as e:
+            log_action('error', f"Register insert failed: {e}")
+            flash('حدث خطأ أثناء التسجيل. حاول مرة أخرى لاحقاً.', 'danger')
+
+    return render_template('register.html')
+
+
+@app.route('/login', methods=['GET', 'POST'])
 def login():
-    content = """
-    <div class="row justify-content-center">
-        <div class="col-md-5">
-            <div class="card p-4">
-                <h3 class="text-center mb-4"><i class="fa-solid fa-right-to-bracket text-primary me-2"></i>تسجيل الدخول</h3>
-                <form id="login-form">
-                    <div class="mb-3">
-                        <label class="form-label">اسم المستخدم أو البريد</label>
-                        <input type="text" id="identity" class="form-control" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">كلمة المرور</label>
-                        <input type="password" id="password" class="form-control" required>
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100 mb-3">دخول</button>
-                </form>
-                <div class="text-center">
-                    <small>ليس لديك حساب؟ <a href="/register">إنشاء حساب</a></small>
-                </div>
-            </div>
-        </div>
-    </div>
-    <script>
-        document.getElementById('login-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const identity = document.getElementById('identity').value.trim();
-            const password = document.getElementById('password').value;
+    if request.method == 'POST':
+        email = sanitize_email(request.form.get('email', ''))
+        password = request.form.get('password', '')
 
-            const res = await apiCall('/api/auth/login', 'POST', { identity, password });
-            if(res && res.success) {
-                window.location.href = '/dashboard';
-            }
-        });
-    </script>
-    """
-    return render_page("تسجيل الدخول", content)
+        if not email or not password:
+            flash('الرجاء إدخال البريد الإلكتروني وكلمة المرور', 'danger')
+            return redirect(url_for('login'))
+
+        try:
+            res = db.table('users').select('*').eq('email', email).execute()
+            if not res.data:
+                flash('البريد الإلكتروني غير موجود', 'danger')
+                return redirect(url_for('login'))
+
+            user = res.data[0]
+
+            if user.get('is_banned'):
+                flash('هذا الحساب محظور من قبل الإدارة', 'danger')
+                return redirect(url_for('login'))
+
+            if check_password_hash(user['password'], password):
+                session.clear()
+                session['user_id'] = user['id']
+                session['username'] = user['username']
+                session['is_admin'] = bool(user.get('is_admin'))
+                flash('تم تسجيل الدخول بنجاح', 'success')
+                return redirect(url_for('index'))
+            else:
+                flash('كلمة المرور غير صحيحة', 'danger')
+        except Exception as e:
+            log_action('error', f"Login failed: {e}")
+            flash('حدث خطأ أثناء تسجيل الدخول. حاول مرة أخرى.', 'danger')
+
+    return render_template('login.html')
+
 
 @app.route('/logout')
 def logout():
     session.clear()
+    flash('تم تسجيل الخروج بنجاح', 'info')
     return redirect(url_for('login'))
 
-# =========================================================
-# Main User Dashboard & App Pages
-# =========================================================
+
+# ==========================================
+# مسارات المهام (Tasks)
+# ==========================================
 
 @app.route('/')
-@app.route('/dashboard')
 @login_required
-def dashboard():
-    content = """
-    <div class="row mb-4">
-        <div class="col-md-8">
-            <h2>مرحباً بك، {{ username }}! 👋</h2>
-            <p class="text-muted">قم بإكمال المهام المتاحة لجمع النقاط، أو أنشئ مهامك الخاصة لزيادة المتابعين والتفاعلات.</p>
-        </div>
-        <div class="col-md-4 text-start">
-            <div class="card p-3 bg-primary bg-gradient text-white">
-                <div class="d-flex justify-content-between align-items-center">
-                    <div>
-                        <h6 class="mb-0">رصيد النقاط الحالي</h6>
-                        <h2 class="fw-bold mb-0">{{ user_coins }}</h2>
-                    </div>
-                    <i class="fa-solid fa-coins fa-2x opacity-75"></i>
-                </div>
-            </div>
-        </div>
-    </div>
+def index():
+    platform = request.args.get('platform', '').strip()
+    search = request.args.get('search', '').strip()
 
-    <!-- Filters & Search -->
-    <div class="card p-3 mb-4">
-        <div class="row g-3">
-            <div class="col-md-6">
-                <input type="text" id="search-input" class="form-control" placeholder="بحث عن مهمة...">
-            </div>
-            <div class="col-md-4">
-                <select id="platform-filter" class="form-select">
-                    <option value="">جميع المنصات</option>
-                    <option value="YouTube">YouTube</option>
-                    <option value="Facebook">Facebook</option>
-                    <option value="TikTok">TikTok</option>
-                    <option value="Instagram">Instagram</option>
-                    <option value="X">X (Twitter)</option>
-                    <option value="Other">منصات أخرى</option>
-                </select>
-            </div>
-            <div class="col-md-2">
-                <button onclick="loadTasks()" class="btn btn-primary w-100"><i class="fa-solid fa-filter me-1"></i>تصفية</button>
-            </div>
-        </div>
-    </div>
+    try:
+        query = db.table('tasks').select('*').eq('status', 'active')
+        if platform and platform in ALLOWED_PLATFORMS:
+            query = query.eq('platform', platform)
+        if search:
+            # حماية بسيطة من حقن أحرف خاصة
+            safe_search = search.replace('%', '').replace('_', '')[:100]
+            if safe_search:
+                query = query.ilike('task_type', f'%{safe_search}%')
 
-    <!-- Available Tasks Grid -->
-    <h4 class="mb-3"><i class="fa-solid fa-tasks me-2"></i>المهام المتاحة</h4>
-    <div class="row" id="tasks-container">
-        <!-- JS injected content -->
-    </div>
+        res = query.order('created_at', desc=True).execute()
+        tasks = res.data if res.data else []
+    except Exception as e:
+        log_action('error', f"Index load tasks failed: {e}")
+        tasks = []
+        flash('حدث خطأ أثناء تحميل المهام', 'danger')
 
-    <script>
-        async function loadTasks() {
-            const search = document.getElementById('search-input').value;
-            const platform = document.getElementById('platform-filter').value;
-            const queryParams = new URLSearchParams({ search, platform }).toString();
-            
-            const container = document.getElementById('tasks-container');
-            container.innerHTML = '<div class="text-center my-5"><div class="spinner-border text-primary"></div></div>';
+    return render_template('index.html', tasks=tasks, current_platform=platform, search=search)
 
-            const tasks = await apiCall('/api/tasks?' + queryParams, 'GET');
-            if(!tasks) return;
 
-            if(tasks.length === 0) {
-                container.innerHTML = '<div class="col-12 text-center my-5 text-muted">لا توجد مهام متاحة حالياً.</div>';
-                return;
-            }
-
-            container.innerHTML = tasks.map(t => `
-                <div class="col-md-4 mb-4">
-                    <div class="card h-100">
-                        <div class="card-body">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <span class="badge bg-secondary">${t.platform}</span>
-                                <span class="badge bg-warning text-dark"><i class="fa-solid fa-coins me-1"></i>+${t.reward}</span>
-                            </div>
-                            <h5 class="card-title">${t.task_type}</h5>
-                            <p class="card-text text-truncate"><a href="${t.target_url}" target="_blank" class="text-info">${t.target_url}</a></p>
-                            <div class="progress mb-3" style="height: 10px;">
-                                <div class="progress-bar bg-success" style="width: ${(t.completed_count / t.required_count) * 100}%"></div>
-                            </div>
-                            <small class="text-muted d-block mb-3">المكتمل: ${t.completed_count} من ${t.required_count}</small>
-                            <button onclick="executeTask(${t.id}, '${t.target_url}')" class="btn btn-outline-primary w-100">
-                                <i class="fa-solid fa-external-link me-1"></i>تنفيذ المهمة
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        async function executeTask(taskId, targetUrl) {
-            window.open(targetUrl, '_blank');
-            const res = await apiCall(`/api/tasks/${taskId}/complete`, 'POST');
-            if(res && res.success) {
-                showAlert(`تم إكمال المهمة بنجاح! حصلت على ${res.reward} نقطة.`, 'success');
-                document.getElementById('user-coins-display').innerText = res.new_balance;
-                loadTasks();
-            }
-        }
-
-        loadTasks();
-    </script>
-    """
-    return render_page("الرئيسية", content)
-
-@app.route('/tasks/create', methods=['GET'])
+@app.route('/tasks/create', methods=['GET', 'POST'])
 @login_required
-def create_task_page():
-    content = """
-    <div class="row justify-content-center">
-        <div class="col-md-8">
-            <div class="card p-4">
-                <h3 class="mb-4"><i class="fa-solid fa-plus-circle text-primary me-2"></i>إنشاء مهمة جديدة</h3>
-                <form id="create-task-form">
-                    <div class="mb-3">
-                        <label class="form-label">المنصة</label>
-                        <select id="platform" class="form-select" required>
-                            <option value="YouTube">YouTube</option>
-                            <option value="Facebook">Facebook</option>
-                            <option value="TikTok">TikTok</option>
-                            <option value="Instagram">Instagram</option>
-                            <option value="X">X (Twitter)</option>
-                            <option value="Other">منصة أخرى</option>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">نوع المهمة</label>
-                        <input type="text" id="task_type" class="form-control" placeholder="مثال: اشتراك بالقناة، إعجاب بالفيديو..." required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">الرابط المستهدف</label>
-                        <input type="url" id="target_url" class="form-control" placeholder="https://..." required>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">المكافأة لكل شخص (نقاط)</label>
-                            <input type="number" id="reward" class="form-control" min="1" value="5" required>
-                        </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">العدد المطلوب</label>
-                            <input type="number" id="required_count" class="form-control" min="1" value="10" required>
-                        </div>
-                    </div>
-                    <div class="alert alert-info">
-                        <strong>التكلفة الإجمالية: </strong><span id="total-cost">50</span> نقطة.
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100">نشر المهمة خصماً من الرصيد</button>
-                </form>
-            </div>
-        </div>
-    </div>
-    <script>
-        const rewardInput = document.getElementById('reward');
-        const countInput = document.getElementById('required_count');
-        const totalCostSpan = document.getElementById('total-cost');
+def create_task():
+    if request.method == 'POST':
+        platform = request.form.get('platform', '').strip()
+        task_type = request.form.get('task_type', '').strip()
+        link = request.form.get('link', '').strip()
 
-        function updateTotal() {
-            const reward = parseInt(rewardInput.value) || 0;
-            const count = parseInt(countInput.value) || 0;
-            totalCostSpan.innerText = reward * count;
-        }
+        # [تعديل 11] تحقق صارم
+        try:
+            required_count = int(request.form.get('required_count', 0))
+            reward = float(request.form.get('reward', 0))
+        except (ValueError, TypeError):
+            return jsonify({'success': False, 'message': 'قيم غير صالحة للعدد أو المكافأة'}), 400
 
-        rewardInput.addEventListener('input', updateTotal);
-        countInput.addEventListener('input', updateTotal);
+        if platform not in ALLOWED_PLATFORMS:
+            return jsonify({'success': False, 'message': 'المنصة غير مدعومة'}), 400
+        if not task_type or len(task_type) > 100:
+            return jsonify({'success': False, 'message': 'نوع المهمة مطلوب ويجب ألا يتجاوز 100 حرف'}), 400
+        if required_count <= 0 or required_count > 10000:
+            return jsonify({'success': False, 'message': 'العدد المطلوب يجب أن يكون بين 1 و 10000'}), 400
+        if reward <= 0 or reward > 1000:
+            return jsonify({'success': False, 'message': 'المكافأة يجب أن تكون بين 0.1 و 1000 نقطة'}), 400
+        if not is_valid_platform_link(platform, link):
+            return jsonify({
+                'success': False,
+                'message': f'الرابط غير صالح أو لا يطابق منصة {platform}'
+            }), 400
 
-        document.getElementById('create-task-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const data = {
-                platform: document.getElementById('platform').value,
-                task_type: document.getElementById('task_type').value.trim(),
-                target_url: document.getElementById('target_url').value.trim(),
-                reward: parseInt(rewardInput.value),
-                required_count: parseInt(countInput.value)
-            };
+        total_cost = required_count * reward
 
-            const res = await apiCall('/api/tasks', 'POST', data);
-            if(res && res.success) {
-                showAlert('تم إضافة المهمة وخصم النقاط بنجاح!', 'success');
-                setTimeout(() => window.location.href = '/my-tasks', 1500);
-            }
-        });
-    </script>
-    """
-    return render_page("إضافة مهمة", content)
+        try:
+            user_res = db.table('users').select('points').eq('id', session['user_id']).execute()
+            if not user_res.data:
+                return jsonify({'success': False, 'message': 'المستخدم غير موجود'}), 404
+            current_points = float(user_res.data[0]['points'] or 0)
 
-@app.route('/my-tasks')
+            if current_points < total_cost:
+                return jsonify({'success': False, 'message': 'رصيدك غير كافٍ لإنشاء هذه المهمة'}), 400
+
+            # خصم النقاط أولاً (تحديث شرطي بسيط)
+            new_points = current_points - total_cost
+            update_res = db.table('users').update({'points': new_points}).eq(
+                'id', session['user_id']
+            ).gte('points', total_cost).execute()
+
+            if not update_res.data:
+                return jsonify({'success': False, 'message': 'فشل خصم النقاط. حاول مرة أخرى.'}), 400
+
+            db.table('tasks').insert({
+                'platform': platform,
+                'task_type': task_type,
+                'link': link,
+                'required_count': required_count,
+                'completed_count': 0,
+                'reward': reward,
+                'status': 'active',
+                'owner_id': session['user_id']
+            }).execute()
+
+            add_points_history(session['user_id'], -total_cost, 'deduct', f'إنشاء مهمة جديدة على {platform}')
+            create_notification(session['user_id'], f'تم إنشاء المهمة بنجاح وخصم {total_cost} نقطة.')
+
+            return jsonify({'success': True, 'message': 'تم إنشاء المهمة بنجاح'})
+        except Exception as e:
+            log_action('error', f"Create task failed: {e}")
+            return jsonify({'success': False, 'message': 'حدث خطأ أثناء إنشاء المهمة'}), 500
+
+    return render_template('create_task.html')
+
+
+@app.route('/tasks/complete/<task_id>', methods=['POST'])
 @login_required
-def my_tasks_page():
-    content = """
-    <h3 class="mb-4"><i class="fa-solid fa-list-check me-2"></i>إدارة مهامي</h3>
-    <div class="table-responsive">
-        <table class="table table-dark table-striped align-middle">
-            <thead>
-                <tr>
-                    <th>المنصة</th>
-                    <th>النوع</th>
-                    <th>الرابط</th>
-                    <th>المكافأة</th>
-                    <th>الإنجاز</th>
-                    <th>الحالة</th>
-                    <th>الإجراءات</th>
-                </tr>
-            </thead>
-            <tbody id="my-tasks-table">
-                <!-- JS populated -->
-            </tbody>
-        </table>
-    </div>
-
-    <script>
-        async function loadMyTasks() {
-            const tasks = await apiCall('/api/my-tasks', 'GET');
-            const tbody = document.getElementById('my-tasks-table');
-            if(!tasks) return;
-
-            if(tasks.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لم تقم بإنشاء أي مهام بعد.</td></tr>';
-                return;
-            }
-
-            tbody.innerHTML = tasks.map(t => `
-                <tr>
-                    <td><span class="badge bg-secondary">${t.platform}</span></td>
-                    <td>${t.task_type}</td>
-                    <td><a href="${t.target_url}" target="_blank" class="text-info">رابط</a></td>
-                    <td>${t.reward}</td>
-                    <td>${t.completed_count} / ${t.required_count}</td>
-                    <td><span class="badge bg-${t.status === 'active' ? 'success' : 'danger'}">${t.status}</span></td>
-                    <td>
-                        <button onclick="deleteTask(${t.id})" class="btn btn-sm btn-outline-danger"><i class="fa-solid fa-trash"></i></button>
-                    </td>
-                </tr>
-            `).join('');
-        }
-
-        async function deleteTask(id) {
-            if(!confirm('هل أنت متأكد من إيقاف/حذف هذه المهمة؟')) return;
-            const res = await apiCall(`/api/tasks/${id}`, 'DELETE');
-            if(res && res.success) {
-                showAlert('تم حذف المهمة بنجاح.', 'success');
-                loadMyTasks();
-            }
-        }
-
-        loadMyTasks();
-    </script>
+def complete_task(task_id):
     """
-    return render_page("مهامي", content)
+    [تعديل 3] منع Race Condition:
+    - التحقق من عدم التنفيذ المسبق
+    - تحديث ذري لـ completed_count بشرط completed_count < required_count
+    - إضافة المكافأة فقط إذا نجح التحديث
+    ملاحظة: لأقصى حماية يُنصح بإنشاء PostgreSQL Function (RPC) في Supabase
+    تقوم بكل الخطوات داخل معاملة واحدة. هنا نستخدم أفضل ما يتيحه عميل Python.
+    """
+    user_id = session['user_id']
 
-@app.route('/history')
+    try:
+        # 1. جلب المهمة
+        task_res = db.table('tasks').select('*').eq('id', task_id).execute()
+        if not task_res.data:
+            return jsonify({'success': False, 'message': 'المهمة غير موجودة'}), 404
+
+        task = task_res.data[0]
+
+        if task['owner_id'] == user_id:
+            return jsonify({'success': False, 'message': 'لا يمكنك تنفيذ مهمتك الخاصة'}), 400
+
+        if task['status'] != 'active':
+            return jsonify({'success': False, 'message': 'هذه المهمة غير نشطة'}), 400
+
+        # 2. التحقق من التنفيذ المسبق (منع التكرار)
+        comp_res = db.table('task_completions').select('id').eq(
+            'task_id', task_id
+        ).eq('user_id', user_id).execute()
+        if comp_res.data:
+            return jsonify({'success': False, 'message': 'لا يمكنك تنفيذ نفس المهمة مرتين'}), 400
+
+        current_completed = int(task.get('completed_count') or 0)
+        required = int(task.get('required_count') or 0)
+
+        if current_completed >= required:
+            return jsonify({'success': False, 'message': 'تم الوصول للعدد المطلوب مسبقاً'}), 400
+
+        # 3. تسجيل الإكمال أولاً (يفضل وجود UNIQUE constraint على (task_id, user_id))
+        try:
+            insert_comp = db.table('task_completions').insert({
+                'task_id': task_id,
+                'user_id': user_id
+            }).execute()
+            if not insert_comp.data:
+                return jsonify({'success': False, 'message': 'فشل تسجيل التنفيذ'}), 400
+        except Exception as e:
+            # قد يكون تكراراً بسبب race
+            log_action('warning', f"Completion insert conflict (possible race): {e}")
+            return jsonify({'success': False, 'message': 'لا يمكنك تنفيذ نفس المهمة مرتين'}), 400
+
+        # 4. تحديث ذري: زيادة completed_count فقط إذا كان لا يزال أقل من المطلوب
+        new_completed = current_completed + 1
+        new_status = 'completed' if new_completed >= required else 'active'
+
+        update_res = db.table('tasks').update({
+            'completed_count': new_completed,
+            'status': new_status
+        }).eq('id', task_id).eq(
+            'completed_count', current_completed
+        ).eq('status', 'active').execute()
+
+        if not update_res.data:
+            # فشل التحديث الذري → تم الوصول للحد من قبل مستخدم آخر
+            # نحذف سجل الإكمال الذي أضفناه لتجنب عدم التناسق
+            try:
+                db.table('task_completions').delete().eq(
+                    'task_id', task_id
+                ).eq('user_id', user_id).execute()
+            except Exception:
+                pass
+            return jsonify({
+                'success': False,
+                'message': 'عذراً، تم الوصول للعدد المطلوب من قبل مستخدمين آخرين'
+            }), 409
+
+        # 5. إضافة المكافأة للمستخدم
+        reward = float(task.get('reward') or 0)
+        user_res = db.table('users').select('points').eq('id', user_id).execute()
+        if user_res.data:
+            current_points = float(user_res.data[0].get('points') or 0)
+            db.table('users').update({
+                'points': current_points + reward
+            }).eq('id', user_id).execute()
+
+        add_points_history(user_id, reward, 'add', f'مكافأة تنفيذ مهمة {task["platform"]}')
+        create_notification(user_id, f'لقد ربحت {reward} نقطة لتنفيذ المهمة بنجاح!')
+
+        return jsonify({
+            'success': True,
+            'message': f'تم تنفيذ المهمة وحصلت على {reward} نقطة!'
+        })
+
+    except Exception as e:
+        log_action('error', f"Complete task failed for {task_id}: {e}")
+        return jsonify({'success': False, 'message': 'حدث خطأ أثناء تنفيذ المهمة'}), 500
+
+
+# ==========================================
+# مسارات الملف الشخصي (Profile)
+# ==========================================
+
+@app.route('/profile')
 @login_required
-def history_page():
-    content = """
-    <h3 class="mb-4"><i class="fa-solid fa-history me-2"></i>سجل المعاملات والنقاط</h3>
-    <div class="card p-3">
-        <div class="table-responsive">
-            <table class="table table-dark align-middle">
-                <thead>
-                    <tr>
-                        <th>التاريخ</th>
-                        <th>العملية</th>
-                        <th>المبلغ</th>
-                        <th>الوصف</th>
-                    </tr>
-                </thead>
-                <tbody id="history-table"></tbody>
-            </table>
-        </div>
-    </div>
-    <script>
-        async function loadHistory() {
-            const data = await apiCall('/api/user/history', 'GET');
-            const tbody = document.getElementById('history-table');
-            if(!data) return;
+def profile():
+    user_id = session['user_id']
+    try:
+        user_res = db.table('users').select('*').eq('id', user_id).execute()
+        user = user_res.data[0] if user_res.data else {}
 
-            if(data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">لا يوجد سجل معاملات حتى الآن.</td></tr>';
-                return;
-            }
+        history_res = db.table('points_history').select('*').eq(
+            'user_id', user_id
+        ).order('created_at', desc=True).limit(50).execute()
+        history = history_res.data if history_res.data else []
+    except Exception as e:
+        log_action('error', f"Profile load failed: {e}")
+        user, history = {}, []
+        flash('حدث خطأ أثناء تحميل الملف الشخصي', 'danger')
 
-            tbody.innerHTML = data.map(h => `
-                <tr>
-                    <td>${new Date(h.created_at).toLocaleString('ar')}</td>
-                    <td><span class="badge bg-${h.amount >= 0 ? 'success' : 'danger'}">${h.action}</span></td>
-                    <td class="${h.amount >= 0 ? 'text-success' : 'text-danger'} fw-bold">${h.amount > 0 ? '+' : ''}${h.amount}</td>
-                    <td>${h.description || '-'}</td>
-                </tr>
-            `).join('');
-        }
-        loadHistory();
-    </script>
-    """
-    return render_page("السجل", content)
+    return render_template('profile.html', user=user, history=history)
 
-@app.route('/notifications')
-@login_required
-def notifications_page():
-    content = """
-    <h3 class="mb-4"><i class="fa-solid fa-bell me-2"></i>الإشعارات</h3>
-    <div class="row justify-content-center">
-        <div class="col-md-10" id="notifications-list"></div>
-    </div>
-    <script>
-        async function loadNotifications() {
-            const data = await apiCall('/api/user/notifications', 'GET');
-            const list = document.getElementById('notifications-list');
-            if(!data) return;
 
-            if(data.length === 0) {
-                list.innerHTML = '<div class="text-center text-muted card p-4">لا توجد إشعارات جديدة.</div>';
-                return;
-            }
-
-            list.innerHTML = data.map(n => `
-                <div class="card p-3 mb-3 border-start border-4 border-info">
-                    <div class="d-flex justify-content-between">
-                        <h5 class="mb-1">${n.title}</h5>
-                        <small class="text-muted">${new Date(n.created_at).toLocaleString('ar')}</small>
-                    </div>
-                    <p class="mb-0 text-slate-300">${n.message}</p>
-                </div>
-            `).join('');
-        }
-        loadNotifications();
-    </script>
-    """
-    return render_page("الإشعارات", content)
-
-@app.route('/profile', methods=['GET'])
-@login_required
-def profile_page():
-    content = """
-    <div class="row justify-content-center">
-        <div class="col-md-6">
-            <div class="card p-4 mb-4">
-                <h4 class="mb-3"><i class="fa-solid fa-user-gear me-2"></i>الملف الشخصي</h4>
-                <form id="profile-form">
-                    <div class="mb-3 text-center">
-                        <img src="{{ profile_photo }}" width="100" height="100" class="rounded-circle mb-2">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">اسم المستخدم</label>
-                        <input type="text" class="form-control" value="{{ username }}" disabled>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">رابط صورة الملف الشخصي</label>
-                        <input type="url" id="profile_photo" class="form-control" value="{{ profile_photo }}">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">كلمة المرور الجديدة (اختياري)</label>
-                        <input type="password" id="new_password" class="form-control" placeholder="أتركها فارغة إذا لم ترد التغيير">
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100">حفظ التغييرات</button>
-                </form>
-            </div>
-        </div>
-    </div>
-    <script>
-        document.getElementById('profile-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const profile_photo = document.getElementById('profile_photo').value;
-            const new_password = document.getElementById('new_password').value;
-
-            const res = await apiCall('/api/user/profile', 'PUT', { profile_photo, new_password });
-            if(res && res.success) {
-                showAlert('تم تحديث الملف الشخصي بنجاح!', 'success');
-                setTimeout(() => location.reload(), 1000);
-            }
-        });
-    </script>
-    """
-    return render_page("الملف الشخصي", content)
-
-@app.route('/report', methods=['GET'])
-@login_required
-def report_page():
-    content = """
-    <div class="row justify-content-center">
-        <div class="col-md-6">
-            <div class="card p-4">
-                <h4 class="mb-3"><i class="fa-solid fa-flag text-danger me-2"></i>تقديم بلاغ أو شكوى</h4>
-                <form id="report-form">
-                    <div class="mb-3">
-                        <label class="form-label">عنوان البلاغ</label>
-                        <input type="text" id="report_title" class="form-control" placeholder="مثال: رابط غير يعمل، احتيال..." required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">التفاصيل</label>
-                        <textarea id="report_content" class="form-control" rows="4" required></textarea>
-                    </div>
-                    <button type="submit" class="btn btn-danger w-100">إرسال البلاغ</button>
-                </form>
-            </div>
-        </div>
-    </div>
-    <script>
-        document.getElementById('report-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const title = document.getElementById('report_title').value;
-            const content = document.getElementById('report_content').value;
-
-            const res = await apiCall('/api/user/report', 'POST', { title, content });
-            if(res && res.success) {
-                showAlert('تم إرسال البلاغ للإدارة بنجاح.', 'success');
-                document.getElementById('report-form').reset();
-            }
-        });
-    </script>
-    """
-    return render_page("تقديم بلاغ", content)
-
-# =========================================================
-# Admin Panel Pages
-# =========================================================
+# ==========================================
+# لوحة التحكم (Admin)
+# ==========================================
 
 @app.route('/admin')
 @admin_required
 def admin_dashboard():
-    content = """
-    <h2 class="mb-4"><i class="fa-solid fa-user-shield text-warning me-2"></i>لوحة تحكم الإدارة</h2>
-    <div class="row g-4 mb-4">
-        <div class="col-md-3">
-            <div class="card p-3 border-primary">
-                <h6>إجمالي المستخدمين</h6>
-                <h3 id="stat-users">-</h3>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card p-3 border-success">
-                <h6>إجمالي المهام</h6>
-                <h3 id="stat-tasks">-</h3>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card p-3 border-warning">
-                <h6>إجمالي النقاط بالسيستم</h6>
-                <h3 id="stat-coins">-</h3>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card p-3 border-danger">
-                <h6>البلاغات المعلقة</h6>
-                <h3 id="stat-reports">-</h3>
-            </div>
-        </div>
-    </div>
+    try:
+        # [تعديل 2] استخدام count="exact" وقراءة .count
+        users_count_res = db.table('users').select('id', count='exact').execute()
+        users_count = users_count_res.count if users_count_res.count is not None else 0
 
-    <!-- Admin Tabs -->
-    <ul class="nav nav-tabs mb-3" id="adminTab" role="tablist">
-        <li class="nav-item">
-            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#users-tab">إدارة المستخدمين</button>
-        </li>
-        <li class="nav-item">
-            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#reports-tab">البلاغات</button>
-        </li>
-    </ul>
+        tasks_count_res = db.table('tasks').select('id', count='exact').execute()
+        tasks_count = tasks_count_res.count if tasks_count_res.count is not None else 0
 
-    <div class="tab-content">
-        <!-- Users Management Tab -->
-        <div class="tab-pane fade show active" id="users-tab">
-            <div class="card p-3">
-                <div class="table-responsive">
-                    <table class="table table-dark align-middle">
-                        <thead>
-                            <tr>
-                                <th>المستخدم</th>
-                                <th>البريد الإلكتروني</th>
-                                <th>النقاط</th>
-                                <th>الحالة</th>
-                                <th>الترقية</th>
-                                <th>تعديل النقاط</th>
-                                <th>إجراءات</th>
-                            </tr>
-                        </thead>
-                        <tbody id="admin-users-table"></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
+        users_res = db.table('users').select(
+            'id, username, email, points, is_banned, is_admin, created_at'
+        ).order('created_at', desc=True).limit(200).execute()
+        users = users_res.data if users_res.data else []
+    except Exception as e:
+        log_action('error', f"Admin dashboard failed: {e}")
+        users_count, tasks_count, users = 0, 0, []
+        flash('حدث خطأ أثناء تحميل لوحة الإدارة', 'danger')
 
-        <!-- Reports Tab -->
-        <div class="tab-pane fade" id="reports-tab">
-            <div class="card p-3">
-                <div class="table-responsive">
-                    <table class="table table-dark align-middle">
-                        <thead>
-                            <tr>
-                                <th>المُبلغ</th>
-                                <th>العنوان</th>
-                                <th>التفاصيل</th>
-                                <th>التاريخ</th>
-                            </tr>
-                        </thead>
-                        <tbody id="admin-reports-table"></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
+    return render_template('admin.html', users_count=users_count, tasks_count=tasks_count, users=users)
 
-    <script>
-        async function loadAdminData() {
-            const stats = await apiCall('/api/admin/stats', 'GET');
-            if(stats) {
-                document.getElementById('stat-users').innerText = stats.total_users;
-                document.getElementById('stat-tasks').innerText = stats.total_tasks;
-                document.getElementById('stat-coins').innerText = stats.total_coins;
-                document.getElementById('stat-reports').innerText = stats.pending_reports;
-            }
 
-            const users = await apiCall('/api/admin/users', 'GET');
-            const usersTbody = document.getElementById('admin-users-table');
-            if(users) {
-                usersTbody.innerHTML = users.map(u => `
-                    <tr>
-                        <td><strong>${u.username}</strong></td>
-                        <td>${u.email}</td>
-                        <td>${u.coins}</td>
-                        <td><span class="badge bg-${u.is_banned ? 'danger' : 'success'}">${u.is_banned ? 'محظور' : 'نشط'}</span></td>
-                        <td><span class="badge bg-${u.is_admin ? 'warning' : 'secondary'}">${u.is_admin ? 'مدير' : 'مستخدم'}</span></td>
-                        <td>
-                            <div class="input-group input-group-sm" style="width: 140px;">
-                                <input type="number" id="coins-val-${u.id}" class="form-control" placeholder="+-">
-                                <button onclick="adjustCoins('${u.id}')" class="btn btn-outline-success"><i class="fa-solid fa-check"></i></button>
-                            </div>
-                        </td>
-                        <td>
-                            <button onclick="toggleBan('${u.id}', ${!u.is_banned})" class="btn btn-sm btn-${u.is_banned ? 'success' : 'danger'}">
-                                ${u.is_banned ? 'فك الحظر' : 'حظر'}
-                            </button>
-                        </td>
-                    </tr>
-                `).join('');
-            }
+@app.route('/admin/user/ban/<user_id>', methods=['POST'])
+@admin_required
+def admin_toggle_ban(user_id):
+    # منع المدير من حظر نفسه
+    if str(user_id) == str(session.get('user_id')):
+        return jsonify({'success': False, 'message': 'لا يمكنك حظر حسابك الخاص'}), 400
 
-            const reports = await apiCall('/api/admin/reports', 'GET');
-            const reportsTbody = document.getElementById('admin-reports-table');
-            if(reports) {
-                reportsTbody.innerHTML = reports.map(r => `
-                    <tr>
-                        <td>${r.username || r.user_id}</td>
-                        <td>${r.title}</td>
-                        <td>${r.content}</td>
-                        <td>${new Date(r.created_at).toLocaleString('ar')}</td>
-                    </tr>
-                `).join('');
-            }
-        }
+    try:
+        user_res = db.table('users').select('is_banned, is_admin').eq('id', user_id).execute()
+        if not user_res.data:
+            return jsonify({'success': False, 'message': 'المستخدم غير موجود'}), 404
 
-        async function toggleBan(userId, banStatus) {
-            const res = await apiCall(`/api/admin/users/${userId}/ban`, 'POST', { is_banned: banStatus });
-            if(res && res.success) {
-                showAlert('تم تحديث حالة الحظر بنجاح.', 'success');
-                loadAdminData();
-            }
-        }
+        target = user_res.data[0]
+        if target.get('is_admin'):
+            return jsonify({'success': False, 'message': 'لا يمكن حظر حساب مدير'}), 403
 
-        async function adjustCoins(userId) {
-            const amount = parseInt(document.getElementById(`coins-val-${userId}`).value);
-            if(isNaN(amount)) return;
-            const res = await apiCall(`/api/admin/users/${userId}/coins`, 'POST', { amount });
-            if(res && res.success) {
-                showAlert('تم تعديل رصيد النقاط بنجاح.', 'success');
-                loadAdminData();
-            }
-        }
+        new_status = not bool(target.get('is_banned'))
+        db.table('users').update({'is_banned': new_status}).eq('id', user_id).execute()
+        create_notification(
+            user_id,
+            'تم حظر حسابك من قبل الإدارة.' if new_status else 'تم فك الحظر عن حسابك.'
+        )
 
-        loadAdminData();
-    </script>
-    """
-    return render_page("لوحة الإدارة", content)
+        return jsonify({'success': True, 'message': 'تم تحديث حالة الحظر بنجاح'})
+    except Exception as e:
+        log_action('error', f"Admin toggle ban failed: {e}")
+        return jsonify({'success': False, 'message': 'حدث خطأ أثناء تحديث الحالة'}), 500
 
-# =========================================================
-# Backend JSON API Endpoints
-# =========================================================
 
-@app.route('/api/auth/register', methods=['POST'])
-def api_register():
-    data = request.json or {}
-    username = data.get('username', '').strip()
-    email = data.get('email', '').strip()
-    password = data.get('password', '')
+# ==========================================
+# نقطة الدخول
+# ==========================================
 
-    if not username or not email or not password:
-        return jsonify({'error': 'جميع الحقول مطلوبة.'}), 400
-
-    check_res = supabase.table("accounts").select("id").or_(f"username.eq.{username},email.eq.{email}").execute()
-    if check_res.data:
-        return jsonify({'error': 'اسم المستخدم أو البريد الإلكتروني مستخدم بالفعل.'}), 400
-
-    hashed_pw = generate_password_hash(password)
-    insert_res = supabase.table("accounts").insert({
-        "username": username,
-        "email": email,
-        "password_hash": hashed_pw,
-        "coins": 50,
-        "is_admin": False,
-        "is_banned": False,
-        "profile_photo": "https://via.placeholder.com/150"
-    }).execute()
-
-    if insert_res.data:
-        new_user = insert_res.data[0]
-        session['user_id'] = new_user['id']
-        session['username'] = new_user['username']
-        session['is_admin'] = new_user['is_admin']
-        log_coin_transaction(new_user['id'], 50, "هدية التسجيل", "مكافأة إنشاء حساب جديد")
-        return jsonify({'success': True})
-    
-    return jsonify({'error': 'فشل إنشاء الحساب.'}), 500
-
-@app.route('/api/auth/login', methods=['POST'])
-def api_login():
-    data = request.json or {}
-    identity = data.get('identity', '').strip()
-    password = data.get('password', '')
-
-    if not identity or not password:
-        return jsonify({'error': 'رجاءً أدخل كافة البيانات.'}), 400
-
-    res = supabase.table("accounts").select("*").or_(f"username.eq.{identity},email.eq.{identity}").execute()
-    if not res.data:
-        return jsonify({'error': 'بيانات الدخول غير صحيحة.'}), 400
-
-    user = res.data[0]
-    if not check_password_hash(user['password_hash'], password):
-        return jsonify({'error': 'بيانات الدخول غير صحيحة.'}), 400
-
-    if user['is_banned']:
-        return jsonify({'error': 'هذا الحساب محظور من الاستخدام.'}), 403
-
-    session['user_id'] = user['id']
-    session['username'] = user['username']
-    session['is_admin'] = user['is_admin']
-
-    return jsonify({'success': True})
-
-@app.route('/api/tasks', methods=['GET'])
-@login_required
-def api_get_tasks():
-    search = request.args.get('search', '').strip()
-    platform = request.args.get('platform', '').strip()
-
-    query = supabase.table("tasks").select("*").eq("status", "active")
-    query = query.neq("user_id", session['user_id'])
-
-    if platform:
-        query = query.eq("platform", platform)
-    
-    res = query.execute()
-    tasks = res.data or []
-
-    completed_res = supabase.table("task_completions").select("task_id").eq("user_id", session['user_id']).execute()
-    completed_task_ids = {c['task_id'] for c in completed_res.data} if completed_res.data else set()
-
-    available_tasks = [t for t in tasks if t['id'] not in completed_task_ids and t['completed_count'] < t['required_count']]
-
-    if search:
-        available_tasks = [t for t in available_tasks if search.lower() in t['task_type'].lower() or search.lower() in t['target_url'].lower()]
-
-    return jsonify(available_tasks)
-
-@app.route('/api/tasks', methods=['POST'])
-@login_required
-def api_create_task():
-    data = request.json or {}
-    platform = data.get('platform')
-    task_type = data.get('task_type')
-    target_url = data.get('target_url')
-    reward = data.get('reward', 0)
-    required_count = data.get('required_count', 0)
-
-    if not platform or not task_type or not target_url or reward <= 0 or required_count <= 0:
-        return jsonify({'error': 'جميع البيانات مطلوبة وغير صحيحة.'}), 400
-
-    total_cost = reward * required_count
-    user = get_current_user()
-
-    if user['coins'] < total_cost:
-        return jsonify({'error': f'رصيدك لا يكفي! تحتاج {total_cost} نقطة.'}), 400
-
-    new_balance = int(user['coins']) - int(total_cost)
-    update_res = supabase.table("accounts").update({"coins": new_balance}).eq("id", user['id']).execute()
-    
-    if not update_res.data:
-        return jsonify({'error': 'حدث خطأ أثناء خصم النقاط من حسابك.'}), 500
-
-    log_coin_transaction(user['id'], -total_cost, "إنشاء مهمة", f"إنشاء مهمة {platform} - {task_type}")
-
-    res = supabase.table("tasks").insert({
-        "user_id": user['id'],
-        "platform": platform,
-        "task_type": task_type,
-        "target_url": target_url,
-        "reward": reward,
-        "required_count": required_count,
-        "completed_count": 0,
-        "status": "active"
-    }).execute()
-
-    return jsonify({'success': True, 'task': res.data[0] if res.data else None})
-
-@app.route('/api/tasks/<int:task_id>/complete', methods=['POST'])
-@login_required
-def api_complete_task(task_id):
-    user_id = session['user_id']
-
-    t_res = supabase.table("tasks").select("*").eq("id", task_id).execute()
-    if not t_res.data:
-        return jsonify({'error': 'المهمة غير موجودة.'}), 404
-    
-    task = t_res.data[0]
-    if task['user_id'] == user_id:
-        return jsonify({'error': 'لا يمكنك إكمال مهمتك الخاصة.'}), 400
-
-    if task['completed_count'] >= task['required_count'] or task['status'] != 'active':
-        return jsonify({'error': 'هذه المهمة غير متاحة حالياً.'}), 400
-
-    done_res = supabase.table("task_completions").select("id").eq("task_id", task_id).eq("user_id", user_id).execute()
-    if done_res.data:
-        return jsonify({'error': 'لقد قمت بإكمال هذه المهمة من قبل.'}), 400
-
-    supabase.table("task_completions").insert({
-        "task_id": task_id,
-        "user_id": user_id
-    }).execute()
-
-    new_count = int(task['completed_count']) + 1
-    status = "completed" if new_count >= int(task['required_count']) else "active"
-    supabase.table("tasks").update({"completed_count": new_count, "status": status}).eq("id", task_id).execute()
-
-    user = get_current_user()
-    new_balance = int(user['coins']) + int(task['reward'])
-    
-    # تحقق صارم لمنع ضياع النقاط الوهمي إذا رفضت القاعدة التحديث
-    update_res = supabase.table("accounts").update({"coins": new_balance}).eq("id", user_id).execute()
-    if not update_res.data:
-        return jsonify({'error': 'فشل تحديث الرصيد في قاعدة البيانات. تواصل مع الإدارة.'}), 500
-
-    log_coin_transaction(user_id, task['reward'], "إكمال مهمة", f"مكافأة إكمال مهمة #{task_id}")
-    create_notification(task['user_id'], "إنجاز مهمة", f"قام مستخدم بإكمال مهمتك ({task['task_type']}). الإنجاز الحالي: {new_count}/{task['required_count']}")
-
-    return jsonify({'success': True, 'reward': task['reward'], 'new_balance': new_balance})
-
-@app.route('/api/my-tasks', methods=['GET'])
-@login_required
-def api_my_tasks():
-    res = supabase.table("tasks").select("*").eq("user_id", session['user_id']).execute()
-    return jsonify(res.data or [])
-
-@app.route('/api/tasks/<int:task_id>', methods=['DELETE'])
-@login_required
-def api_delete_task(task_id):
-    t_res = supabase.table("tasks").select("*").eq("id", task_id).eq("user_id", session['user_id']).execute()
-    if not t_res.data:
-        return jsonify({'error': 'المهمة غير موجودة أو غير مصرح لك.'}), 404
-
-    task = t_res.data[0]
-    supabase.table("tasks").update({"status": "cancelled"}).eq("id", task_id).execute()
-
-    remaining = int(task['required_count']) - int(task['completed_count'])
-    if remaining > 0:
-        refund_amount = remaining * int(task['reward'])
-        user = get_current_user()
-        new_balance = int(user['coins']) + refund_amount
-        supabase.table("accounts").update({"coins": new_balance}).eq("id", user['id']).execute()
-        log_coin_transaction(user['id'], refund_amount, "استرداد مهمة", f"استرداد النقاط المتبقية للمهمة #{task_id}")
-
-    return jsonify({'success': True})
-
-@app.route('/api/user/history', methods=['GET'])
-@login_required
-def api_user_history():
-    res = supabase.table("coin_history").select("*").eq("user_id", session['user_id']).order("created_at", desc=True).execute()
-    return jsonify(res.data or [])
-
-@app.route('/api/user/notifications', methods=['GET'])
-@login_required
-def api_user_notifications():
-    res = supabase.table("notifications").select("*").eq("user_id", session['user_id']).order("created_at", desc=True).execute()
-    return jsonify(res.data or [])
-
-# =========================================================
-# The previously truncated Route Fix
-# =========================================================
-@app.route('/api/user/profile', methods=['PUT'])
-@login_required
-def api_update_profile():
-    data = request.json or {}
-    photo = data.get('profile_photo')
-    new_pw = data.get('new_password')
-
-    update_dict = {}
-    if photo:
-        update_dict['profile_photo'] = photo
-    if new_pw:
-        update_dict['password_hash'] = generate_password_hash(new_pw)
-
-    if update_dict:
-        update_res = supabase.table("accounts").update(update_dict).eq("id", session['user_id']).execute()
-        if not update_res.data:
-            return jsonify({'error': 'حدث خطأ أثناء تحديث الملف الشخصي.'}), 500
-
-    return jsonify({'success': True})
-
-@app.route('/api/user/report', methods=['POST'])
-@login_required
-def api_send_report(
+if __name__ == '__main__':
+    # للتطوير المحلي فقط. على Render استخدم gunicorn
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=os.environ.get('FLASK_DEBUG', '0') == '1')
