@@ -1,14 +1,3 @@
-Flask
-Flask-WTF
-gunicorn
-python-dotenv
-supabase
-Jinja2
-Werkzeug
-google-genai
-flask
-flask-wtf
-supabase
-python-dotenv
-werkzeug
-jinja2
+flask==3.0.2
+google-genai==1.3.0
+gunicorn==21.2.0
