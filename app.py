@@ -64,7 +64,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==========================================
-# إعداد عميل Google Gemini AI
+# إعداد عميل Google Gemini AI والنماذج الاحتياطية
 # ==========================================
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 ai_client = None
@@ -73,6 +73,14 @@ if gemini_api_key:
         ai_client = genai.Client(api_key=gemini_api_key)
     except Exception as e:
         logger.error(f"Failed to initialize Gemini client: {e}")
+
+# قائمة النماذج المرتبة حسب الأولوية لتجربتها تلقائياً في حال فشل أحدها
+GEMINI_MODELS = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro'
+]
 
 # ==========================================
 # نظام القوالب (DictLoader)
@@ -605,7 +613,7 @@ def handle_500(e):
 
 
 # ==========================================
-# مسار الذكاء الاصطناعي (POST /ai)
+# مسار الذكاء الاصطناعي (POST /ai) مع نظام التبديل التلقائي للاحتياط
 # ==========================================
 
 @app.route('/ai', methods=['POST'])
@@ -622,22 +630,35 @@ def ask_ai():
     if not message:
         return jsonify({'reply': 'الرجاء إدخال سؤال أو رسالة صحيحة.'}), 400
 
-    try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=message,
-        )
-        reply_text = response.text if response and response.text else 'لم يتم تلقي رد من نموذج الذكاء الاصطناعي.'
-        return jsonify({'reply': reply_text})
-    except genai_errors.APIError as e:
-        log_action('error', f"Gemini API error: {e}")
-        error_msg = str(e)
-        if "404" in error_msg or "not_found" in error_msg.lower() or "no longer available" in error_msg.lower():
-            return jsonify({'reply': 'عذراً، نموذج الذكاء الاصطناعي المستخدم غير متاح حالياً. يرجى تحديث اسم النموذج.'}), 500
-        return jsonify({'reply': f'حدث خطأ في خدمة الذكاء الاصطناعي: {error_msg}'}), 500
-    except Exception as e:
-        log_action('error', f"AI route unexpected error: {e}")
-        return jsonify({'reply': 'حدث خطأ غير متوقع أثناء معالجة الطلب.'}), 500
+    response = None
+    last_error = None
+
+    # محاولة تجربة النماذج بترتيب الأولوية تلقائياً
+    for model_name in GEMINI_MODELS:
+        try:
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=message,
+            )
+            if response and response.text:
+                break
+        except genai_errors.APIError as e:
+            last_error = e
+            log_action('warning', f"Model {model_name} failed with APIError: {e}")
+            continue
+        except Exception as e:
+            last_error = e
+            log_action('warning', f"Model {model_name} failed with unexpected error: {e}")
+            continue
+
+    if response and response.text:
+        return jsonify({'reply': response.text})
+    
+    # في حال فشل جميع النماذج المتاحة
+    log_action('error', f"All Gemini models failed. Last error: {last_error}")
+    return jsonify({
+        'reply': 'عذراً، نماذج الذكاء الاصطناعي غير متاحة حالياً أو حدث خطأ في الاتصال بخدمة Gemini. يرجى المحاولة لاحقاً.'
+    }), 500
 
 
 # ==========================================
