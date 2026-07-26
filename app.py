@@ -1,83 +1,79 @@
-import os
-from flask import Flask, jsonify
-from google import genai
+# ==========================================
+# التعديل الخاص بنظام الذكاء الاصطناعي (Gemini)
+# ==========================================
 
-app = Flask(__name__)
-
-# ============================================
-# إعداد المفاتيح حسب Environment Variables في Render
-# GEMINI_API_KEY | SUPABASE_KEY | SUPABASE_URL
-# ============================================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-
-ai_client = None
-
-if GEMINI_API_KEY:
+# جلب النماذج المدعومة ديناميكياً والتأكد من توافق الأسماء (مع دعم التبديل التلقائي وتسجيل الأخطاء)
+GEMINI_MODELS = []
+if ai_client:
     try:
-        ai_client = genai.Client(api_key=GEMINI_API_KEY)
-        print("✅ ai_client تم إنشاؤه بنجاح باستخدام GEMINI_API_KEY")
-    except Exception as e:
-        print(f"❌ خطأ في إنشاء ai_client: {e}")
-        ai_client = None
-else:
-    print("⚠️ لم يتم العثور على GEMINI_API_KEY")
-
-
-# ============================================
-# Route تشخيصي مؤقت - /test-models
-# يعرض جميع نماذج Gemini المتاحة
-# ============================================
-@app.route('/test-models')
-def test_models():
-    if not ai_client:
-        return jsonify({"error": "No API Key"}), 400
-
-    try:
-        models = []
+        # استعراض النماذج المتاحة من العميل مباشرة حسب أحدث إصدار لمكتبة google-genai
         for m in ai_client.models.list():
-            models.append(m.name)
-
-        return jsonify({
-            "status": "success",
-            "total_models": len(models),
-            "models": models
-        })
+            # نقوم بالبحث عن النماذج التي تدعم توليد المحتوى (generateContent)
+            supported_actions = getattr(m, 'supported_generation_methods', [])
+            model_name = getattr(m, 'name', '')
+            if model_name and ('generateContent' in supported_actions or not supported_actions):
+                # تنظيف اسم النموذج من بادئة "models/" إذا وجدت لتجنب أخطاء التوافق، أو الاحتفاظ بالاسم النقي
+                clean_name = model_name.replace('models/', '')
+                if clean_name not in GEMINI_MODELS:
+                    GEMINI_MODELS.append(clean_name)
     except Exception as e:
+        logger.warning(f"Could not list models dynamically: {e}")
+
+# إذا لم يتم جلب أي نموذج تلقائياً، نضع قائمة احتياطية افتراضية مستقرة
+if not GEMINI_MODELS:
+    GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+
+
+@app.route('/ai', methods=['POST'])
+@login_required
+def ask_ai():
+    if not ai_client:
         return jsonify({
-            "status": "error",
-            "message": str(e)
+            'reply': 'عذراً، مفتاح Gemini API غير متوفر في متغيرات البيئة (GEMINI_API_KEY).'
         }), 500
 
+    data = request.get_json(silent=True) or {}
+    message = data.get('message', '').strip()
 
-# ============================================
-# صفحة رئيسية بسيطة
-# ============================================
-@app.route('/')
-def home():
-    return '''
-    <html dir="rtl">
-    <head>
-        <title>تشخيص نماذج Gemini</title>
-        <style>
-            body { font-family: Arial, sans-serif; padding: 40px; background: #f5f5f5; }
-            .box { background: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            a { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #4285f4; color: white; text-decoration: none; border-radius: 6px; }
-            a:hover { background: #3367d6; }
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <h2>تشخيص نماذج Google Gemini</h2>
-            <p>اضغط على الزر أدناه لعرض جميع النماذج المتاحة لمفتاح API الحالي.</p>
-            <a href="/test-models">عرض النماذج المتاحة</a>
-        </div>
-    </body>
-    </html>
-    '''
+    if not message:
+        return jsonify({'reply': 'الرجاء إدخال سؤال أو رسالة صحيحة.'}), 400
 
+    response = None
+    last_error_message = ""
+    successful_model = ""
 
-if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5001))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    # تجربة النماذج المتاحة تباعاً مع معالجة البادئة تلقائياً
+    for base_model_name in GEMINI_MODELS:
+        # اختبار الاحتمالين (مع بادئة models/ أو بدونها) لضمان التوافق التام مع أحدث إصدار
+        models_to_try = [base_model_name, f"models/{base_model_name}"] if not base_model_name.startswith("models/") else [base_model_name, base_model_name.replace("models/", "")]
+        
+        for model_to_test in models_to_try:
+            try:
+                logger.info(f"جرب استخدام النموذج: {model_to_test}")
+                response = ai_client.models.generate_content(
+                    model=model_to_test,
+                    contents=message,
+                )
+                if response and response.text:
+                    successful_model = model_to_test
+                    logger.info(f"نجح النموذج في توليد الرد: {successful_model}")
+                    break
+            except genai_errors.APIError as e:
+                last_error_message = str(e)
+                logger.error(f"خطأ API حقيقي من Gemini للنموذج {model_to_test}: {last_error_message}")
+                continue
+            except Exception as e:
+                last_error_message = str(e)
+                logger.error(f"خطأ غير متوقع للنموذج {model_to_test}: {last_error_message}")
+                continue
+        
+        if response and response.text:
+            break
+
+    if response and response.text:
+        return jsonify({'reply': response.text})
+    
+    # في حال فشل جميع النماذج، يتم إرجاع رسالة واضحة تحتوي على تفاصيل الخطأ الحقيقي دون تعطل التطبيق
+    return jsonify({
+        'reply': f'عذراً، تعذر الحصول على رد من نماذج الذكاء الاصطناعي. تفاصيل الخطأ: {last_error_message or "النماذج غير متاحة حالياً"}'
+    }), 500
