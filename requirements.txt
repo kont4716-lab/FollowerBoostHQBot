@@ -5,3 +5,10 @@ python-dotenv
 supabase
 Jinja2
 Werkzeug
+google-genai
+flask
+flask-wtf
+supabase
+python-dotenv
+werkzeug
+jinja2
