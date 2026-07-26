@@ -631,7 +631,10 @@ def ask_ai():
         return jsonify({'reply': reply_text})
     except genai_errors.APIError as e:
         log_action('error', f"Gemini API error: {e}")
-        return jsonify({'reply': 'حدث خطأ في خدمة الذكاء الاصطناعي. حاول مرة أخرى لاحقاً.'}), 500
+        error_msg = str(e)
+        if "404" in error_msg or "not_found" in error_msg.lower() or "no longer available" in error_msg.lower():
+            return jsonify({'reply': 'عذراً، نموذج الذكاء الاصطناعي المستخدم غير متاح حالياً. يرجى تحديث اسم النموذج.'}), 500
+        return jsonify({'reply': f'حدث خطأ في خدمة الذكاء الاصطناعي: {error_msg}'}), 500
     except Exception as e:
         log_action('error', f"AI route unexpected error: {e}")
         return jsonify({'reply': 'حدث خطأ غير متوقع أثناء معالجة الطلب.'}), 500
