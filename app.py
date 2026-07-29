@@ -1,13 +1,42 @@
-FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
+from flask import Flask, jsonify
+from playwright.sync_api import sync_playwright
 
-WORKDIR /app
+app = Flask(__name__)
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+URL = "https://example.com/login"   # غيّر إلى رابط موقعك
+PHONE = "0555123456"
+PASSWORD = "123456"
 
-COPY . .
+@app.route("/")
+def home():
+    return "Automation Server Running"
 
-# تثبيت متصفحات Playwright (احتياطي)
-RUN playwright install chromium
+@app.route("/run")
+def run():
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
 
-CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+            page.goto(URL, wait_until="networkidle")
+
+            # عدّل المحددات لتناسب صفحة موقعك
+            page.fill('input[name="phone"]', PHONE)
+            page.fill('input[name="password"]', PASSWORD)
+
+            page.click('button[type="submit"]')
+
+            page.wait_for_timeout(3000)
+
+            browser.close()
+
+        return jsonify({"success": True})
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
