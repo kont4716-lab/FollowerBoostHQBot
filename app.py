@@ -2,10 +2,21 @@ from flask import Flask, request, render_template_string, send_file
 from playwright.sync_api import sync_playwright
 import os
 import uuid
-import glob
+import subprocess
 import traceback
 
 app = Flask(__name__)
+
+# تثبيت Chromium عند تشغيل التطبيق
+try:
+    subprocess.run(
+        ["playwright", "install", "chromium"],
+        check=True
+    )
+    print("Chromium installed successfully")
+except Exception as e:
+    print("Chromium install error:", e)
+
 
 SCREENSHOT_FOLDER = "screenshots"
 os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
@@ -16,7 +27,8 @@ HTML = """
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<title>لقطة شاشة المواقع</title>
+<title>لقطة شاشة موقع</title>
+
 <style>
 body{
     font-family:Arial;
@@ -24,6 +36,7 @@ body{
     text-align:center;
     padding:40px;
 }
+
 .box{
     background:white;
     padding:30px;
@@ -31,6 +44,7 @@ body{
     max-width:500px;
     margin:auto;
 }
+
 input{
     width:90%;
     padding:12px;
@@ -38,22 +52,26 @@ input{
     border-radius:8px;
     border:1px solid #ccc;
 }
+
 button{
     padding:12px 25px;
     background:#007bff;
     color:white;
-    border:0;
+    border:none;
     border-radius:8px;
 }
+
 img{
     width:100%;
     margin-top:20px;
 }
+
 .error{
     color:red;
     margin-top:20px;
 }
 </style>
+
 </head>
 
 <body>
@@ -91,6 +109,7 @@ required>
 </div>
 {% endif %}
 
+
 </div>
 
 </body>
@@ -121,30 +140,13 @@ def home():
 
             with sync_playwright() as p:
 
-                # البحث عن Chromium المثبت في Render
-                chromium = glob.glob(
-                    "/opt/render/.cache/ms-playwright/chromium-*/chrome-linux/chrome"
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage"
+                    ]
                 )
-
-
-                if chromium:
-                    browser = p.chromium.launch(
-                        executable_path=chromium[0],
-                        headless=True,
-                        args=[
-                            "--no-sandbox",
-                            "--disable-dev-shm-usage"
-                        ]
-                    )
-
-                else:
-                    browser = p.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--no-sandbox",
-                            "--disable-dev-shm-usage"
-                        ]
-                    )
 
 
                 page = browser.new_page(
@@ -189,7 +191,7 @@ def home():
 
 
 @app.route("/image/<name>")
-def get_image(name):
+def image(name):
 
     return send_file(
         os.path.join(
@@ -205,4 +207,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=5000
-                    )
+    )
