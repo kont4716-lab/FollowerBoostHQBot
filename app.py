@@ -2,8 +2,11 @@ from flask import Flask, request, render_template_string, send_file
 from playwright.sync_api import sync_playwright
 import os
 import uuid
+import traceback
 
 app = Flask(__name__)
+
+app.config["PROPAGATE_EXCEPTIONS"] = True
 
 SCREENSHOT_FOLDER = "screenshots"
 os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
@@ -15,13 +18,15 @@ HTML = """
 <head>
 <meta charset="UTF-8">
 <title>لقطة شاشة المواقع</title>
+
 <style>
 body{
-    font-family: Arial;
-    background:#f2f2f2;
+    font-family:Arial;
+    background:#f1f1f1;
     text-align:center;
-    padding:50px;
+    padding:40px;
 }
+
 .box{
     background:white;
     padding:30px;
@@ -29,24 +34,36 @@ body{
     max-width:500px;
     margin:auto;
 }
+
 input{
     width:90%;
     padding:12px;
+    border-radius:8px;
+    border:1px solid #ccc;
     margin:10px;
 }
+
 button{
-    padding:12px 25px;
     background:#007bff;
     color:white;
+    padding:12px 25px;
     border:0;
     border-radius:8px;
     cursor:pointer;
 }
+
 img{
-    max-width:90%;
+    width:100%;
+    margin-top:20px;
+    border-radius:10px;
+}
+
+.error{
+    color:red;
     margin-top:20px;
 }
 </style>
+
 </head>
 
 <body>
@@ -56,17 +73,38 @@ img{
 <h2>📸 التقاط صورة موقع</h2>
 
 <form method="POST">
-<input name="url" placeholder="ضع رابط الموقع هنا" required>
+
+<input 
+name="url"
+placeholder="ضع رابط الموقع هنا"
+required>
+
 <br>
+
 <button>
 التقاط الصورة
 </button>
+
 </form>
 
+
 {% if image %}
-<h3>النتيجة:</h3>
+
+<h3>الصورة:</h3>
+
 <img src="/image/{{image}}">
+
 {% endif %}
+
+
+{% if error %}
+
+<div class="error">
+{{error}}
+</div>
+
+{% endif %}
+
 
 </div>
 
@@ -79,54 +117,81 @@ img{
 def home():
 
     image = None
+    error = None
+
 
     if request.method == "POST":
 
-        url = request.form["url"]
+        url = request.form.get("url")
 
-        filename = str(uuid.uuid4()) + ".png"
-        path = os.path.join(
-            SCREENSHOT_FOLDER,
-            filename
-        )
 
-        with sync_playwright() as p:
+        try:
 
-            browser = p.chromium.launch(
-                headless=True
+            filename = str(uuid.uuid4()) + ".png"
+
+            path = os.path.join(
+                SCREENSHOT_FOLDER,
+                filename
             )
 
-            page = browser.new_page(
-                viewport={
-                    "width":1280,
-                    "height":900
-                }
-            )
 
-            page.goto(
-                url,
-                wait_until="networkidle",
-                timeout=60000
-            )
+            with sync_playwright() as p:
 
-            page.screenshot(
-                path=path,
-                full_page=True
-            )
 
-            browser.close()
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage"
+                    ]
+                )
 
-        image = filename
+
+                page = browser.new_page(
+                    viewport={
+                        "width":1280,
+                        "height":900
+                    }
+                )
+
+
+                page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=60000
+                )
+
+
+                page.screenshot(
+                    path=path,
+                    full_page=True
+                )
+
+
+                browser.close()
+
+
+            image = filename
+
+
+        except Exception as e:
+
+            error = str(e)
+
+            print(traceback.format_exc())
 
 
     return render_template_string(
         HTML,
-        image=image
+        image=image,
+        error=error
     )
+
 
 
 @app.route("/image/<name>")
 def image(name):
+
     return send_file(
         os.path.join(
             SCREENSHOT_FOLDER,
@@ -135,8 +200,10 @@ def image(name):
     )
 
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
+
     app.run(
         host="0.0.0.0",
         port=5000
-    )
+            )
