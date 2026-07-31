@@ -24,10 +24,10 @@ SCREENSHOT_FOLDER = "screenshots"
 os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
 
 
-# مهلات قصيرة لتقليل استهلاك الموارد ومنع تعليق العمال
-GOTO_TIMEOUT = 30000      # 30 ثانية
-ACTION_TIMEOUT = 5000     # 5 ثوانٍ للنقر/الكتابة
-WAIT_AFTER_CLICK = 800    # انتظار قصير بعد النقر
+# مهلات قصيرة لتقليل استهلاك الموارد
+GOTO_TIMEOUT = 30000
+ACTION_TIMEOUT = 5000
+WAIT_AFTER_CLICK = 800
 
 
 HTML = """
@@ -169,7 +169,6 @@ def home():
         try:
             with sync_playwright() as p:
 
-                # إعدادات Chromium منخفضة الاستهلاك للذاكرة (مناسبة لـ Render المجاني)
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
@@ -196,7 +195,6 @@ def home():
                     viewport={"width": 1280, "height": 900}
                 )
 
-                # فتح الصفحة بمهلة معقولة
                 page.goto(
                     url,
                     wait_until="domcontentloaded",
@@ -213,12 +211,18 @@ def home():
                             clicked = False
                             last_error = None
 
-                            # 1) جرب العناصر الظاهرة أولاً (حتى 5 عناصر لتجنب التأخير)
+                            # جرب العناصر الظاهرة أولاً
                             for i in range(min(count, 5)):
                                 try:
                                     loc = element.nth(i)
-                                    if loc.is_visible(timeout=800):
-                                        loc.scroll_into_view_if_needed(timeout=1500)
+
+                                    if loc.is_visible(timeout=1000):
+                                        # الـ scroll اختياري (لو فشل نتجاهله)
+                                        try:
+                                            loc.scroll_into_view_if_needed(timeout=3000)
+                                        except Exception:
+                                            pass
+
                                         loc.click(timeout=ACTION_TIMEOUT)
                                         page.wait_for_timeout(WAIT_AFTER_CLICK)
                                         result = "✅ تم النقر على الكلمة"
@@ -228,10 +232,9 @@ def home():
                                     last_error = e
                                     continue
 
-                            # 2) إذا لم ينجح → جرب force click على أول عنصر
+                            # لو ما نجح → force click مباشرة
                             if not clicked:
                                 try:
-                                    element.first.scroll_into_view_if_needed(timeout=1500)
                                     element.first.click(timeout=3000, force=True)
                                     page.wait_for_timeout(WAIT_AFTER_CLICK)
                                     result = "✅ تم النقر على الكلمة (force)"
@@ -252,17 +255,19 @@ def home():
                         inputs = page.locator("input:visible")
 
                         if inputs.count() == 0:
-                            # fallback: أي input
                             inputs = page.locator("input")
 
                         if inputs.count() > 0:
                             try:
                                 target = inputs.first
-                                target.scroll_into_view_if_needed(timeout=1500)
+                                try:
+                                    target.scroll_into_view_if_needed(timeout=3000)
+                                except Exception:
+                                    pass
+
                                 target.fill(write_text, timeout=ACTION_TIMEOUT)
                                 result = "✅ تم إدخال النص"
                             except Exception as e:
-                                # محاولة force
                                 try:
                                     inputs.first.fill(write_text, timeout=3000, force=True)
                                     result = "✅ تم إدخال النص (force)"
@@ -273,7 +278,7 @@ def home():
                     except Exception as e:
                         result = "⚠️ خطأ أثناء البحث عن خانة الكتابة: " + str(e)
 
-                # التقاط صورة في الحالة العادية
+                # التقاط صورة
                 try:
                     page.screenshot(path=path, full_page=True)
                     image = filename
@@ -281,11 +286,9 @@ def home():
                     pass
 
         except Exception:
-            # أي خطأ غير متوقع → عرض الـ traceback الكامل
             error = traceback.format_exc()
             print(error)
 
-            # محاولة التقاط لقطة شاشة إن أمكن قبل الإغلاق
             if page is not None:
                 try:
                     page.screenshot(path=path, full_page=True)
@@ -294,7 +297,6 @@ def home():
                     pass
 
         finally:
-            # إغلاق المتصفح دائماً
             if browser is not None:
                 try:
                     browser.close()
@@ -320,4 +322,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=5000
-)
+        )
