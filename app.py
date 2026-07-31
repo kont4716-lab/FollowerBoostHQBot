@@ -4,18 +4,16 @@ import os
 import uuid
 import subprocess
 import traceback
-import gc
 
 
 app = Flask(__name__)
 
 
-# تثبيت Chromium مرة واحدة فقط
+# تثبيت Chromium عند التشغيل
 try:
     subprocess.run(
         ["playwright", "install", "chromium"],
-        check=False,
-        timeout=120
+        check=False
     )
     print("Chromium installed successfully")
 except Exception as e:
@@ -26,9 +24,10 @@ SCREENSHOT_FOLDER = "screenshots"
 os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
 
 
-GOTO_TIMEOUT = 25000
+# مهلات قصيرة
+GOTO_TIMEOUT = 30000
 ACTION_TIMEOUT = 4000
-WAIT_AFTER_CLICK = 600
+WAIT_AFTER_CLICK = 800
 
 
 HTML = """
@@ -66,11 +65,13 @@ img{width:100%;margin-top:20px;}
 
 @app.route("/", methods=["GET", "POST"])
 def home():
+
     image = None
     result = None
     error = None
 
     if request.method == "POST":
+
         url = request.form.get("url")
         click_text = request.form.get("click_text")
         write_text = request.form.get("write_text")
@@ -83,6 +84,7 @@ def home():
 
         try:
             with sync_playwright() as p:
+
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
@@ -95,129 +97,104 @@ def home():
                         "--disable-default-apps",
                         "--disable-sync",
                         "--no-first-run",
+                        "--disable-translate",
                         "--mute-audio",
                         "--hide-scrollbars",
+                        "--disable-features=TranslateUI",
+                        "--disable-ipc-flooding-protection",
                         "--single-process",
                         "--renderer-process-limit=1",
-                        "--disable-features=VizDisplayCompositor",
-                        "--memory-pressure-off",
                     ]
                 )
 
                 page = browser.new_page(
-                    viewport={"width": 1024, "height": 768}  # أصغر لتوفير الذاكرة
+                    viewport={"width": 1280, "height": 900}
                 )
 
-                page.goto(url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT)
+                page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=GOTO_TIMEOUT
+                )
 
-                # ---------- النقر ----------
+                # ---------- النقر على الكلمة ----------
                 if click_text:
                     try:
                         element = page.get_by_text(click_text, exact=False)
-                        count = element.count()
 
-                        if count > 0:
-                            clicked = False
-                            last_error = None
-
-                            for i in range(min(count, 3)):  # أقل عدد لتقليل الوقت
-                                try:
-                                    loc = element.nth(i)
-                                    if loc.is_visible(timeout=800):
-                                        try:
-                                            loc.scroll_into_view_if_needed(timeout=2000)
-                                        except Exception:
-                                            pass
-                                        loc.click(timeout=ACTION_TIMEOUT)
-                                        page.wait_for_timeout(WAIT_AFTER_CLICK)
-                                        result = "✅ تم النقر على الكلمة"
-                                        clicked = True
-                                        break
-                                except Exception as e:
-                                    last_error = e
-                                    continue
-
-                            if not clicked:
-                                try:
-                                    element.first.click(timeout=2500, force=True)
-                                    page.wait_for_timeout(WAIT_AFTER_CLICK)
-                                    result = "✅ تم النقر على الكلمة (force)"
-                                    clicked = True
-                                except Exception as e:
-                                    last_error = e
-
-                            if not clicked:
-                                result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(last_error)
+                        if element.count() > 0:
+                            try:
+                                element.first.click(timeout=ACTION_TIMEOUT)
+                                page.wait_for_timeout(WAIT_AFTER_CLICK)
+                                result = "✅ تم النقر على الكلمة"
+                            except Exception as e:
+                                result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(e)
                         else:
                             result = "❌ لم يتم العثور على الكلمة"
                     except Exception as e:
                         result = "⚠️ خطأ أثناء البحث عن الكلمة: " + str(e)
 
-                # ---------- الكتابة ----------
+                # ---------- الكتابة في أول خانة ----------
                 if write_text:
                     try:
-                        inputs = page.locator("input:visible")
-                        if inputs.count() == 0:
-                            inputs = page.locator("input")
+                        inputs = page.locator("input")
 
                         if inputs.count() > 0:
                             try:
-                                target = inputs.first
-                                try:
-                                    target.scroll_into_view_if_needed(timeout=2000)
-                                except Exception:
-                                    pass
-                                target.fill(write_text, timeout=ACTION_TIMEOUT)
+                                inputs.first.fill(write_text, timeout=ACTION_TIMEOUT)
                                 result = "✅ تم إدخال النص"
                             except Exception as e:
-                                try:
-                                    inputs.first.fill(write_text, timeout=2500, force=True)
-                                    result = "✅ تم إدخال النص (force)"
-                                except Exception as e2:
-                                    result = "⚠️ فشل إدخال النص: " + str(e2)
+                                result = "⚠️ فشل إدخال النص: " + str(e)
                         else:
                             result = "❌ لم توجد خانة كتابة"
                     except Exception as e:
                         result = "⚠️ خطأ أثناء البحث عن خانة الكتابة: " + str(e)
 
-                # التقاط صورة
+                # التقاط صورة في الحالة العادية
                 try:
-                    page.screenshot(path=path, full_page=False)  # full_page=False لتوفير الذاكرة
+                    page.screenshot(path=path, full_page=True)
                     image = filename
                 except Exception:
                     pass
 
         except Exception:
+            # أي خطأ غير متوقع → عرض الـ traceback الكامل
             error = traceback.format_exc()
             print(error)
 
+            # محاولة التقاط لقطة شاشة إن أمكن
             if page is not None:
                 try:
-                    page.screenshot(path=path, full_page=False)
+                    page.screenshot(path=path, full_page=True)
                     image = filename
                 except Exception:
                     pass
 
         finally:
-            if page is not None:
-                try:
-                    page.close()
-                except Exception:
-                    pass
+            # إغلاق المتصفح دائماً
             if browser is not None:
                 try:
                     browser.close()
                 except Exception:
                     pass
-            gc.collect()  # تنظيف الذاكرة
 
-    return render_template_string(HTML, result=result, image=image, error=error)
+    return render_template_string(
+        HTML,
+        result=result,
+        image=image,
+        error=error
+    )
 
 
 @app.route("/image/<name>")
 def image(name):
-    return send_file(os.path.join(SCREENSHOT_FOLDER, name))
+    return send_file(
+        os.path.join(SCREENSHOT_FOLDER, name)
+    )
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(
+        host="0.0.0.0",
+        port=5000
+)
