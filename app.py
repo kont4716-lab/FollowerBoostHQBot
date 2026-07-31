@@ -23,7 +23,7 @@ os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
 
 GOTO_TIMEOUT = 20000
 ACTION_TIMEOUT = 3500
-WAIT_AFTER_CLICK = 1000
+WAIT_AFTER_CLICK = 1200
 
 
 HTML = """
@@ -99,28 +99,36 @@ def home():
 
                 page.goto(url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT)
 
-                # النقر
+                # ---------- النقر على الكلمة ----------
                 if click_text:
                     try:
                         element = page.get_by_text(click_text, exact=False)
+
                         if element.count() > 0:
                             try:
-                                element.first.click(timeout=ACTION_TIMEOUT)
+                                # نقر عادي بدون انتظار التنقل
+                                element.first.click(timeout=ACTION_TIMEOUT, no_wait_after=True)
                                 page.wait_for_timeout(WAIT_AFTER_CLICK)
                                 result = "✅ تم النقر على الكلمة"
                             except Exception:
                                 try:
-                                    element.first.click(timeout=2500, force=True)
+                                    # force click بدون انتظار التنقل
+                                    element.first.click(timeout=2500, force=True, no_wait_after=True)
                                     page.wait_for_timeout(WAIT_AFTER_CLICK)
                                     result = "✅ تم النقر على الكلمة (force)"
                                 except Exception as e:
-                                    result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(e)
+                                    error_msg = str(e).lower()
+                                    # لو الرسالة فيها navigated to معناها النقر نجح والصفحة انتقلت
+                                    if "navigated to" in error_msg:
+                                        result = "✅ تم النقر على الكلمة (تم الانتقال)"
+                                    else:
+                                        result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(e)
                         else:
                             result = "❌ لم يتم العثور على الكلمة"
                     except Exception as e:
                         result = "⚠️ خطأ أثناء البحث عن الكلمة: " + str(e)
 
-                # الكتابة
+                # ---------- الكتابة ----------
                 if write_text:
                     try:
                         inputs = page.locator("input")
@@ -135,7 +143,7 @@ def home():
                     except Exception as e:
                         result = "⚠️ خطأ أثناء البحث عن خانة الكتابة: " + str(e)
 
-                # صورة خفيفة
+                # التقاط صورة
                 try:
                     page.screenshot(path=path, full_page=False)
                     image = filename
