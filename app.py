@@ -20,10 +20,14 @@ except Exception as e:
     print("Chromium install error:", e)
 
 
-
 SCREENSHOT_FOLDER = "screenshots"
 os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
 
+
+# مهلات قصيرة لتقليل استهلاك الموارد ومنع تعليق العمال
+GOTO_TIMEOUT = 30000      # 30 ثانية
+ACTION_TIMEOUT = 4000     # 4 ثوانٍ للنقر/الكتابة
+WAIT_AFTER_CLICK = 800    # انتظار قصير بعد النقر
 
 
 HTML = """
@@ -74,6 +78,10 @@ margin-top:20px;
 
 .error{
 color:red;
+white-space:pre-wrap;
+text-align:left;
+direction:ltr;
+font-size:13px;
 }
 
 </style>
@@ -139,185 +147,124 @@ placeholder="النص المراد كتابته">
 """
 
 
-
-
-
-@app.route("/", methods=["GET","POST"])
+@app.route("/", methods=["GET", "POST"])
 def home():
 
     image = None
     result = None
     error = None
 
-
     if request.method == "POST":
-
 
         url = request.form.get("url")
         click_text = request.form.get("click_text")
         write_text = request.form.get("write_text")
 
-
         filename = str(uuid.uuid4()) + ".png"
-
-        path = os.path.join(
-            SCREENSHOT_FOLDER,
-            filename
-        )
-
+        path = os.path.join(SCREENSHOT_FOLDER, filename)
 
         browser = None
         page = None
 
         try:
-
             with sync_playwright() as p:
 
-
+                # إعدادات Chromium منخفضة الاستهلاك للذاكرة (مناسبة لـ Render المجاني)
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
                         "--no-sandbox",
-                        "--disable-dev-shm-usage"
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-software-rasterizer",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-default-apps",
+                        "--disable-sync",
+                        "--no-first-run",
+                        "--disable-translate",
+                        "--mute-audio",
+                        "--hide-scrollbars",
+                        "--disable-features=TranslateUI",
+                        "--disable-ipc-flooding-protection",
+                        "--single-process",
+                        "--renderer-process-limit=1",
                     ]
                 )
 
-
                 page = browser.new_page(
-                    viewport={
-                        "width":1280,
-                        "height":900
-                    }
+                    viewport={"width": 1280, "height": 900}
                 )
 
-
+                # فتح الصفحة بمهلة معقولة
                 page.goto(
                     url,
                     wait_until="domcontentloaded",
-                    timeout=60000
+                    timeout=GOTO_TIMEOUT
                 )
 
-
-                # النقر على الكلمة
+                # ---------- النقر على الكلمة ----------
                 if click_text:
+                    try:
+                        element = page.get_by_text(click_text, exact=False)
 
+                        if element.count() > 0:
+                            try:
+                                # النقر مباشرة مع مهلة قصيرة (بدون wait_for منفصل طويل)
+                                element.first.click(timeout=ACTION_TIMEOUT)
+                                page.wait_for_timeout(WAIT_AFTER_CLICK)
+                                result = "✅ تم النقر على الكلمة"
+                            except Exception as e:
+                                result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(e)
+                        else:
+                            result = "❌ لم يتم العثور على الكلمة"
+                    except Exception as e:
+                        result = "⚠️ خطأ أثناء البحث عن الكلمة: " + str(e)
 
-                    element = page.get_by_text(
-                        click_text,
-                        exact=False
-                    )
-
-
-                    if element.count() > 0:
-
-                        try:
-
-                            element.first.wait_for(
-                                state="visible",
-                                timeout=10000
-                            )
-
-
-                            element.first.click(
-                                timeout=10000
-                            )
-
-
-                            page.wait_for_timeout(2000)
-
-                            result = "✅ تم النقر على الكلمة"
-
-
-                        except Exception as e:
-
-                            result = (
-                                "⚠️ الكلمة موجودة لكن النقر فشل: "
-                                + str(e)
-                            )
-
-
-                    else:
-
-                        result = "❌ لم يتم العثور على الكلمة"
-
-
-
-                # الكتابة في أول خانة
+                # ---------- الكتابة في أول خانة ----------
                 if write_text:
+                    try:
+                        inputs = page.locator("input")
 
+                        if inputs.count() > 0:
+                            try:
+                                # الكتابة مباشرة مع مهلة قصيرة
+                                inputs.first.fill(write_text, timeout=ACTION_TIMEOUT)
+                                result = "✅ تم إدخال النص"
+                            except Exception as e:
+                                result = "⚠️ فشل إدخال النص: " + str(e)
+                        else:
+                            result = "❌ لم توجد خانة كتابة"
+                    except Exception as e:
+                        result = "⚠️ خطأ أثناء البحث عن خانة الكتابة: " + str(e)
 
-                    inputs = page.locator("input")
-
-
-                    if inputs.count() > 0:
-
-
-                        try:
-
-                            inputs.first.wait_for(
-                                state="visible",
-                                timeout=10000
-                            )
-
-
-                            inputs.first.fill(
-                                write_text
-                            )
-
-
-                            result = "✅ تم إدخال النص"
-
-
-                        except Exception as e:
-
-                            result = (
-                                "⚠️ فشل إدخال النص: "
-                                + str(e)
-                            )
-
-
-                    else:
-
-                        result = "❌ لم توجد خانة كتابة"
-
-
-
-                # التقاط صورة دائماً في الحالة العادية
-                page.screenshot(
-                    path=path,
-                    full_page=True
-                )
-
-
-                image = filename
-
+                # التقاط صورة في الحالة العادية
+                try:
+                    page.screenshot(path=path, full_page=True)
+                    image = filename
+                except Exception:
+                    pass
 
         except Exception:
-
+            # أي خطأ غير متوقع → عرض الـ traceback الكامل
             error = traceback.format_exc()
             print(error)
 
-            # محاولة التقاط لقطة شاشة للحالة الحالية قبل الإغلاق
+            # محاولة التقاط لقطة شاشة إن أمكن قبل الإغلاق
             if page is not None:
                 try:
-                    page.screenshot(
-                        path=path,
-                        full_page=True
-                    )
+                    page.screenshot(path=path, full_page=True)
                     image = filename
                 except Exception:
-                    # إذا تعذر التقاط الصورة (مثلاً الصفحة لم تُفتح)
                     pass
 
-
         finally:
-            # إغلاق المتصفح دائماً حتى لا تبقى عمليات مفتوحة
+            # إغلاق المتصفح دائماً
             if browser is not None:
                 try:
                     browser.close()
                 except Exception:
                     pass
-
 
     return render_template_string(
         HTML,
@@ -327,26 +274,15 @@ def home():
     )
 
 
-
-
-
 @app.route("/image/<name>")
 def image(name):
-
     return send_file(
-        os.path.join(
-            SCREENSHOT_FOLDER,
-            name
-        )
+        os.path.join(SCREENSHOT_FOLDER, name)
     )
 
 
-
-
-
 if __name__ == "__main__":
-
     app.run(
         host="0.0.0.0",
         port=5000
-        )
+    )
