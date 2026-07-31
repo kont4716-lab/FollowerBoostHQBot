@@ -26,7 +26,7 @@ os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
 
 # مهلات قصيرة لتقليل استهلاك الموارد ومنع تعليق العمال
 GOTO_TIMEOUT = 30000      # 30 ثانية
-ACTION_TIMEOUT = 4000     # 4 ثوانٍ للنقر/الكتابة
+ACTION_TIMEOUT = 5000     # 5 ثوانٍ للنقر/الكتابة
 WAIT_AFTER_CLICK = 800    # انتظار قصير بعد النقر
 
 
@@ -207,15 +207,40 @@ def home():
                 if click_text:
                     try:
                         element = page.get_by_text(click_text, exact=False)
+                        count = element.count()
 
-                        if element.count() > 0:
-                            try:
-                                # النقر مباشرة مع مهلة قصيرة (بدون wait_for منفصل طويل)
-                                element.first.click(timeout=ACTION_TIMEOUT)
-                                page.wait_for_timeout(WAIT_AFTER_CLICK)
-                                result = "✅ تم النقر على الكلمة"
-                            except Exception as e:
-                                result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(e)
+                        if count > 0:
+                            clicked = False
+                            last_error = None
+
+                            # 1) جرب العناصر الظاهرة أولاً (حتى 5 عناصر لتجنب التأخير)
+                            for i in range(min(count, 5)):
+                                try:
+                                    loc = element.nth(i)
+                                    if loc.is_visible(timeout=800):
+                                        loc.scroll_into_view_if_needed(timeout=1500)
+                                        loc.click(timeout=ACTION_TIMEOUT)
+                                        page.wait_for_timeout(WAIT_AFTER_CLICK)
+                                        result = "✅ تم النقر على الكلمة"
+                                        clicked = True
+                                        break
+                                except Exception as e:
+                                    last_error = e
+                                    continue
+
+                            # 2) إذا لم ينجح → جرب force click على أول عنصر
+                            if not clicked:
+                                try:
+                                    element.first.scroll_into_view_if_needed(timeout=1500)
+                                    element.first.click(timeout=3000, force=True)
+                                    page.wait_for_timeout(WAIT_AFTER_CLICK)
+                                    result = "✅ تم النقر على الكلمة (force)"
+                                    clicked = True
+                                except Exception as e:
+                                    last_error = e
+
+                            if not clicked:
+                                result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(last_error)
                         else:
                             result = "❌ لم يتم العثور على الكلمة"
                     except Exception as e:
@@ -224,15 +249,25 @@ def home():
                 # ---------- الكتابة في أول خانة ----------
                 if write_text:
                     try:
-                        inputs = page.locator("input")
+                        inputs = page.locator("input:visible")
+
+                        if inputs.count() == 0:
+                            # fallback: أي input
+                            inputs = page.locator("input")
 
                         if inputs.count() > 0:
                             try:
-                                # الكتابة مباشرة مع مهلة قصيرة
-                                inputs.first.fill(write_text, timeout=ACTION_TIMEOUT)
+                                target = inputs.first
+                                target.scroll_into_view_if_needed(timeout=1500)
+                                target.fill(write_text, timeout=ACTION_TIMEOUT)
                                 result = "✅ تم إدخال النص"
                             except Exception as e:
-                                result = "⚠️ فشل إدخال النص: " + str(e)
+                                # محاولة force
+                                try:
+                                    inputs.first.fill(write_text, timeout=3000, force=True)
+                                    result = "✅ تم إدخال النص (force)"
+                                except Exception as e2:
+                                    result = "⚠️ فشل إدخال النص: " + str(e2)
                         else:
                             result = "❌ لم توجد خانة كتابة"
                     except Exception as e:
@@ -285,4 +320,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=5000
-    )
+)
