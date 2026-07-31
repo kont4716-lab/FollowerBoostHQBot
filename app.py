@@ -46,8 +46,9 @@ img{width:100%;margin-top:20px;}
 <h2>🌐 مساعد المواقع</h2>
 <form method="POST">
 <input type="url" name="url" placeholder="رابط الموقع" required>
-<input name="click_text" placeholder="الكلمة التي تريد النقر عليها">
-<input name="write_text" placeholder="النص المراد كتابته">
+<input name="click_text" placeholder="الكلمة التي تريد النقر عليها (اختياري)">
+<input name="write_text1" placeholder="النص الأول (إيميل أو رقم هاتف)">
+<input name="write_text2" placeholder="النص الثاني (كلمة المرور)">
 <button>تشغيل</button>
 </form>
 {% if result %}<h3>{{result}}</h3>{% endif %}
@@ -68,13 +69,15 @@ def home():
     if request.method == "POST":
         url = request.form.get("url")
         click_text = request.form.get("click_text")
-        write_text = request.form.get("write_text")
+        write_text1 = request.form.get("write_text1")
+        write_text2 = request.form.get("write_text2")
 
         filename = str(uuid.uuid4()) + ".png"
         path = os.path.join(SCREENSHOT_FOLDER, filename)
 
         browser = None
         page = None
+        messages = []
 
         try:
             with sync_playwright() as p:
@@ -96,54 +99,81 @@ def home():
                 )
 
                 page = browser.new_page(viewport={"width": 1024, "height": 720})
-
                 page.goto(url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT)
 
-                # ---------- النقر على الكلمة ----------
-                if click_text:
+                # ---------- النقر ----------
+                if click_text and click_text.strip():
                     try:
-                        element = page.get_by_text(click_text, exact=False)
-
+                        element = page.get_by_text(click_text.strip(), exact=False)
                         if element.count() > 0:
                             try:
-                                # نقر عادي بدون انتظار التنقل
                                 element.first.click(timeout=ACTION_TIMEOUT, no_wait_after=True)
                                 page.wait_for_timeout(WAIT_AFTER_CLICK)
-                                result = "✅ تم النقر على الكلمة"
+                                messages.append("✅ تم النقر على: " + click_text)
                             except Exception:
                                 try:
-                                    # force click بدون انتظار التنقل
                                     element.first.click(timeout=2500, force=True, no_wait_after=True)
                                     page.wait_for_timeout(WAIT_AFTER_CLICK)
-                                    result = "✅ تم النقر على الكلمة (force)"
+                                    messages.append("✅ تم النقر (force) على: " + click_text)
                                 except Exception as e:
-                                    error_msg = str(e).lower()
-                                    # لو الرسالة فيها navigated to معناها النقر نجح والصفحة انتقلت
-                                    if "navigated to" in error_msg:
-                                        result = "✅ تم النقر على الكلمة (تم الانتقال)"
+                                    if "navigated to" in str(e).lower():
+                                        messages.append("✅ تم النقر والانتقال: " + click_text)
                                     else:
-                                        result = "⚠️ الكلمة موجودة لكن النقر فشل: " + str(e)
+                                        messages.append("⚠️ فشل النقر: " + str(e))
                         else:
-                            result = "❌ لم يتم العثور على الكلمة"
+                            messages.append("❌ لم يتم العثور على: " + click_text)
                     except Exception as e:
-                        result = "⚠️ خطأ أثناء البحث عن الكلمة: " + str(e)
+                        messages.append("⚠️ خطأ في النقر: " + str(e))
 
-                # ---------- الكتابة ----------
-                if write_text:
+                # ---------- النص الأول (إيميل / هاتف) ----------
+                if write_text1 and write_text1.strip():
                     try:
-                        inputs = page.locator("input")
+                        inputs = page.locator('input:visible:not([type="password"]):not([type="hidden"]):not([type="submit"])')
+                        if inputs.count() == 0:
+                            inputs = page.locator('input:not([type="password"]):not([type="hidden"])')
+
                         if inputs.count() > 0:
                             try:
-                                inputs.first.fill(write_text, timeout=ACTION_TIMEOUT)
-                                result = "✅ تم إدخال النص"
-                            except Exception as e:
-                                result = "⚠️ فشل إدخال النص: " + str(e)
+                                inputs.first.fill(write_text1.strip(), timeout=ACTION_TIMEOUT)
+                                messages.append("✅ تم كتابة النص الأول")
+                            except Exception:
+                                try:
+                                    inputs.first.fill(write_text1.strip(), timeout=2500, force=True)
+                                    messages.append("✅ تم كتابة النص الأول (force)")
+                                except Exception as e:
+                                    messages.append("⚠️ فشل النص الأول: " + str(e))
                         else:
-                            result = "❌ لم توجد خانة كتابة"
+                            messages.append("❌ لم توجد خانة للنص الأول")
                     except Exception as e:
-                        result = "⚠️ خطأ أثناء البحث عن خانة الكتابة: " + str(e)
+                        messages.append("⚠️ خطأ في النص الأول: " + str(e))
 
-                # التقاط صورة
+                # ---------- النص الثاني (كلمة المرور) ----------
+                if write_text2 and write_text2.strip():
+                    try:
+                        password = page.locator('input[type="password"]')
+                        if password.count() > 0:
+                            target = password.first
+                        else:
+                            inputs = page.locator('input:visible:not([type="hidden"]):not([type="submit"])')
+                            target = inputs.nth(1) if inputs.count() > 1 else inputs.first
+
+                        if target.count() > 0:
+                            try:
+                                target.fill(write_text2.strip(), timeout=ACTION_TIMEOUT)
+                                messages.append("✅ تم كتابة النص الثاني (باسورد)")
+                            except Exception:
+                                try:
+                                    target.fill(write_text2.strip(), timeout=2500, force=True)
+                                    messages.append("✅ تم كتابة النص الثاني (force)")
+                                except Exception as e:
+                                    messages.append("⚠️ فشل النص الثاني: " + str(e))
+                        else:
+                            messages.append("❌ لم توجد خانة للنص الثاني")
+                    except Exception as e:
+                        messages.append("⚠️ خطأ في النص الثاني: " + str(e))
+
+                result = "<br>".join(messages) if messages else None
+
                 try:
                     page.screenshot(path=path, full_page=False)
                     image = filename
