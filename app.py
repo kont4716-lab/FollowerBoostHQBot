@@ -5,14 +5,15 @@ import uuid
 import subprocess
 import traceback
 
+
 app = Flask(__name__)
 
 
-# تثبيت Chromium عند تشغيل التطبيق مثل النسخة القديمة
+# تثبيت Chromium عند التشغيل
 try:
     subprocess.run(
         ["playwright", "install", "chromium"],
-        check=True
+        check=False
     )
     print("Chromium installed successfully")
 except Exception as e:
@@ -28,52 +29,51 @@ os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
 HTML = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
-
 <head>
-<meta charset="UTF-8">
 
+<meta charset="UTF-8">
 <title>مساعد المواقع</title>
 
 <style>
 
 body{
-    font-family:Arial;
-    background:#f2f2f2;
-    text-align:center;
-    padding:40px;
+font-family:Arial;
+background:#f2f2f2;
+text-align:center;
+padding:40px;
 }
 
 .box{
-    background:white;
-    padding:30px;
-    border-radius:15px;
-    max-width:600px;
-    margin:auto;
+background:white;
+padding:30px;
+border-radius:15px;
+max-width:600px;
+margin:auto;
 }
 
 input{
-    width:90%;
-    padding:12px;
-    margin:10px;
-    border-radius:8px;
-    border:1px solid #ccc;
+width:90%;
+padding:12px;
+margin:10px;
+border-radius:8px;
+border:1px solid #ccc;
 }
 
 button{
-    padding:12px 25px;
-    background:#007bff;
-    color:white;
-    border:0;
-    border-radius:8px;
+padding:12px 25px;
+background:#007bff;
+color:white;
+border:0;
+border-radius:8px;
 }
 
 img{
-    width:100%;
-    margin-top:20px;
+width:100%;
+margin-top:20px;
 }
 
 .error{
-    color:red;
+color:red;
 }
 
 </style>
@@ -83,9 +83,7 @@ img{
 
 <body>
 
-
 <div class="box">
-
 
 <h2>🌐 مساعد المواقع</h2>
 
@@ -93,7 +91,7 @@ img{
 <form method="POST">
 
 
-<input
+<input 
 type="url"
 name="url"
 placeholder="رابط الموقع"
@@ -118,38 +116,25 @@ placeholder="النص المراد كتابته">
 </form>
 
 
-
 {% if result %}
 <h3>{{result}}</h3>
 {% endif %}
 
 
-
 {% if image %}
-
 <h3>الصورة:</h3>
-
 <img src="/image/{{image}}">
-
 {% endif %}
-
 
 
 {% if error %}
-
-<p class="error">
-{{error}}
-</p>
-
+<p class="error">{{error}}</p>
 {% endif %}
-
 
 
 </div>
 
-
 </body>
-
 </html>
 """
 
@@ -173,19 +158,15 @@ def home():
         write_text = request.form.get("write_text")
 
 
+        filename = str(uuid.uuid4()) + ".png"
+
+        path = os.path.join(
+            SCREENSHOT_FOLDER,
+            filename
+        )
+
 
         try:
-
-
-            filename = str(uuid.uuid4()) + ".png"
-
-
-            path = os.path.join(
-                SCREENSHOT_FOLDER,
-                filename
-            )
-
-
 
             with sync_playwright() as p:
 
@@ -199,14 +180,12 @@ def home():
                 )
 
 
-
                 page = browser.new_page(
                     viewport={
                         "width":1280,
                         "height":900
                     }
                 )
-
 
 
                 page.goto(
@@ -216,8 +195,7 @@ def home():
                 )
 
 
-
-                # البحث عن كلمة والنقر عليها
+                # النقر على الكلمة
                 if click_text:
 
 
@@ -229,9 +207,30 @@ def home():
 
                     if element.count() > 0:
 
-                        element.first.click()
+                        try:
 
-                        result = "✅ تم النقر على الكلمة"
+                            element.first.wait_for(
+                                state="visible",
+                                timeout=10000
+                            )
+
+
+                            element.first.click(
+                                timeout=10000
+                            )
+
+
+                            page.wait_for_timeout(2000)
+
+                            result = "✅ تم النقر على الكلمة"
+
+
+                        except Exception as e:
+
+                            result = (
+                                "⚠️ الكلمة موجودة لكن النقر فشل: "
+                                + str(e)
+                            )
 
 
                     else:
@@ -240,8 +239,7 @@ def home():
 
 
 
-
-                # الكتابة في أول خانة موجودة
+                # الكتابة في أول خانة
                 if write_text:
 
 
@@ -250,9 +248,29 @@ def home():
 
                     if inputs.count() > 0:
 
-                        inputs.first.fill(write_text)
 
-                        result = "✅ تم إدخال النص"
+                        try:
+
+                            inputs.first.wait_for(
+                                state="visible",
+                                timeout=10000
+                            )
+
+
+                            inputs.first.fill(
+                                write_text
+                            )
+
+
+                            result = "✅ تم إدخال النص"
+
+
+                        except Exception as e:
+
+                            result = (
+                                "⚠️ فشل إدخال النص: "
+                                + str(e)
+                            )
 
 
                     else:
@@ -261,17 +279,14 @@ def home():
 
 
 
-
-
+                # التقاط صورة دائماً
                 page.screenshot(
                     path=path,
                     full_page=True
                 )
 
 
-
                 browser.close()
-
 
 
             image = filename
@@ -280,22 +295,17 @@ def home():
 
         except Exception as e:
 
-
             error = str(e)
 
             print(traceback.format_exc())
 
 
-
-
-
     return render_template_string(
         HTML,
-        image=image,
         result=result,
+        image=image,
         error=error
     )
-
 
 
 
@@ -315,11 +325,9 @@ def image(name):
 
 
 
-
 if __name__ == "__main__":
-
 
     app.run(
         host="0.0.0.0",
         port=5000
-    )
+                )
