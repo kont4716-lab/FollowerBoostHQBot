@@ -101,27 +101,52 @@ def home():
                 page = browser.new_page(viewport={"width": 1024, "height": 720})
                 page.goto(url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT)
 
-                # ---------- النقر ----------
+                # ---------- النقر (محسّن لفيسبوك) ----------
                 if click_text and click_text.strip():
                     try:
-                        element = page.get_by_text(click_text.strip(), exact=False)
-                        if element.count() > 0:
-                            try:
-                                element.first.click(timeout=ACTION_TIMEOUT, no_wait_after=True)
-                                page.wait_for_timeout(WAIT_AFTER_CLICK)
-                                messages.append("✅ تم النقر على: " + click_text)
-                            except Exception:
+                        clicked = False
+
+                        # 1) جرب كـ button أولاً (أفضل طريقة)
+                        try:
+                            btn = page.get_by_role("button", name=click_text.strip(), exact=False)
+                            if btn.count() > 0:
                                 try:
-                                    element.first.click(timeout=2500, force=True, no_wait_after=True)
+                                    btn.first.click(timeout=ACTION_TIMEOUT, no_wait_after=True)
                                     page.wait_for_timeout(WAIT_AFTER_CLICK)
-                                    messages.append("✅ تم النقر (force) على: " + click_text)
-                                except Exception as e:
-                                    if "navigated to" in str(e).lower():
-                                        messages.append("✅ تم النقر والانتقال: " + click_text)
-                                    else:
-                                        messages.append("⚠️ فشل النقر: " + str(e))
-                        else:
-                            messages.append("❌ لم يتم العثور على: " + click_text)
+                                    messages.append("✅ تم النقر على الزر: " + click_text)
+                                    clicked = True
+                                except Exception:
+                                    btn.first.click(timeout=2500, force=True, no_wait_after=True)
+                                    page.wait_for_timeout(WAIT_AFTER_CLICK)
+                                    messages.append("✅ تم النقر (force) على الزر: " + click_text)
+                                    clicked = True
+                        except Exception:
+                            pass
+
+                        # 2) لو ما نجح → جرب بالنص
+                        if not clicked:
+                            element = page.get_by_text(click_text.strip(), exact=False)
+                            if element.count() > 0:
+                                try:
+                                    element.first.click(timeout=ACTION_TIMEOUT, no_wait_after=True)
+                                    page.wait_for_timeout(WAIT_AFTER_CLICK)
+                                    messages.append("✅ تم النقر على: " + click_text)
+                                    clicked = True
+                                except Exception:
+                                    try:
+                                        element.first.click(timeout=2500, force=True, no_wait_after=True)
+                                        page.wait_for_timeout(WAIT_AFTER_CLICK)
+                                        messages.append("✅ تم النقر (force) على: " + click_text)
+                                        clicked = True
+                                    except Exception as e:
+                                        if "navigated to" in str(e).lower():
+                                            messages.append("✅ تم النقر والانتقال: " + click_text)
+                                            clicked = True
+                                        else:
+                                            messages.append("⚠️ فشل النقر: " + str(e))
+                            else:
+                                messages.append("❌ لم يتم العثور على: " + click_text)
+
                     except Exception as e:
                         messages.append("⚠️ خطأ في النقر: " + str(e))
 
