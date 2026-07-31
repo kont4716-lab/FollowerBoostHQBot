@@ -166,6 +166,9 @@ def home():
         )
 
 
+        browser = None
+        page = None
+
         try:
 
             with sync_playwright() as p:
@@ -279,25 +282,41 @@ def home():
 
 
 
-                # التقاط صورة دائماً
+                # التقاط صورة دائماً في الحالة العادية
                 page.screenshot(
                     path=path,
                     full_page=True
                 )
 
 
-                browser.close()
+                image = filename
 
 
-            image = filename
+        except Exception:
+
+            error = traceback.format_exc()
+            print(error)
+
+            # محاولة التقاط لقطة شاشة للحالة الحالية قبل الإغلاق
+            if page is not None:
+                try:
+                    page.screenshot(
+                        path=path,
+                        full_page=True
+                    )
+                    image = filename
+                except Exception:
+                    # إذا تعذر التقاط الصورة (مثلاً الصفحة لم تُفتح)
+                    pass
 
 
-
-        except Exception as e:
-
-            error = str(e)
-
-            print(traceback.format_exc())
+        finally:
+            # إغلاق المتصفح دائماً حتى لا تبقى عمليات مفتوحة
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
     return render_template_string(
@@ -330,4 +349,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=5000
-                )
+        )
