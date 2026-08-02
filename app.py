@@ -34,11 +34,12 @@ HTML = """
 <title>مساعد المواقع</title>
 <style>
 body{font-family:Arial;background:#f2f2f2;text-align:center;padding:40px;}
-.box{background:white;padding:30px;border-radius:15px;max-width:600px;margin:auto;}
+.box{background:white;padding:30px;border-radius:15px;max-width:650px;margin:auto;}
 input{width:90%;padding:12px;margin:10px;border-radius:8px;border:1px solid #ccc;}
 button{padding:12px 25px;background:#007bff;color:white;border:0;border-radius:8px;}
 img{width:100%;margin-top:20px;}
 .error{color:red;white-space:pre-wrap;text-align:left;direction:ltr;font-size:13px;}
+.info{background:#e8f4fd;padding:12px;border-radius:8px;margin:10px 0;text-align:right;font-size:14px;}
 </style>
 </head>
 <body>
@@ -51,7 +52,7 @@ img{width:100%;margin-top:20px;}
 <input name="write_text2" placeholder="النص الثاني (كلمة المرور)">
 <button>تشغيل</button>
 </form>
-{% if result %}<h3>{{result}}</h3>{% endif %}
+{% if result %}<div class="info">{{result|safe}}</div>{% endif %}
 {% if image %}<h3>الصورة:</h3><img src="/image/{{image}}">{% endif %}
 {% if error %}<p class="error">{{error}}</p>{% endif %}
 </div>
@@ -101,12 +102,66 @@ def home():
                 page = browser.new_page(viewport={"width": 1024, "height": 720})
                 page.goto(url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT)
 
-                # ---------- النقر (محسّن لفيسبوك) ----------
+                # ========== اكتشاف الأزرار وخانات الكتابة ==========
+                try:
+                    # الأزرار
+                    clickables = []
+                    buttons = page.get_by_role("button").all()
+                    for btn in buttons[:12]:
+                        try:
+                            txt = btn.inner_text().strip()
+                            if txt and 1 < len(txt) < 40:
+                                clickables.append(txt)
+                        except:
+                            pass
+
+                    # روابط وأزرار إضافية بالنص
+                    links = page.locator("a:visible, [role='button']:visible").all()
+                    for link in links[:8]:
+                        try:
+                            txt = link.inner_text().strip()
+                            if txt and 1 < len(txt) < 40 and txt not in clickables:
+                                clickables.append(txt)
+                        except:
+                            pass
+
+                    # إزالة التكرار
+                    clickables = list(dict.fromkeys(clickables))
+
+                    if clickables:
+                        messages.append("<b>الأزرار المتاحة للنقر:</b><br>" + " | ".join(clickables[:10]))
+                    else:
+                        messages.append("لم يتم العثور على أزرار واضحة")
+                except Exception as e:
+                    messages.append("خطأ في اكتشاف الأزرار: " + str(e))
+
+                try:
+                    # خانات الكتابة
+                    inputs_info = []
+                    inputs = page.locator("input:visible").all()
+                    for i, inp in enumerate(inputs[:8]):
+                        try:
+                            placeholder = inp.get_attribute("placeholder") or ""
+                            name = inp.get_attribute("name") or ""
+                            typ = inp.get_attribute("type") or "text"
+                            label = placeholder or name or f"خانة {i+1}"
+                            inputs_info.append(f"{label} ({typ})")
+                        except:
+                            pass
+
+                    if inputs_info:
+                        messages.append("<b>خانات الكتابة المتاحة:</b><br>" + " | ".join(inputs_info))
+                    else:
+                        messages.append("لم يتم العثور على خانات كتابة")
+                except Exception as e:
+                    messages.append("خطأ في اكتشاف الخانات: " + str(e))
+
+                # ========== تنفيذ النقر ==========
                 if click_text and click_text.strip():
                     try:
                         clicked = False
 
-                        # 1) جرب كـ button أولاً (أفضل طريقة)
+                        # 1) جرب كـ button
                         try:
                             btn = page.get_by_role("button", name=click_text.strip(), exact=False)
                             if btn.count() > 0:
@@ -123,7 +178,7 @@ def home():
                         except Exception:
                             pass
 
-                        # 2) لو ما نجح → جرب بالنص
+                        # 2) جرب بالنص
                         if not clicked:
                             element = page.get_by_text(click_text.strip(), exact=False)
                             if element.count() > 0:
@@ -146,11 +201,10 @@ def home():
                                             messages.append("⚠️ فشل النقر: " + str(e))
                             else:
                                 messages.append("❌ لم يتم العثور على: " + click_text)
-
                     except Exception as e:
                         messages.append("⚠️ خطأ في النقر: " + str(e))
 
-                # ---------- النص الأول (إيميل / هاتف) ----------
+                # ========== النص الأول ==========
                 if write_text1 and write_text1.strip():
                     try:
                         inputs = page.locator('input:visible:not([type="password"]):not([type="hidden"]):not([type="submit"])')
@@ -172,7 +226,7 @@ def home():
                     except Exception as e:
                         messages.append("⚠️ خطأ في النص الأول: " + str(e))
 
-                # ---------- النص الثاني (كلمة المرور) ----------
+                # ========== النص الثاني (باسورد) ==========
                 if write_text2 and write_text2.strip():
                     try:
                         password = page.locator('input[type="password"]')
