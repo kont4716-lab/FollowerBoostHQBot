@@ -10,4 +10,4 @@ ping:
 runs-on: ubuntu-latest
 steps:
 - name: Ping Render
-run: curl -fsS https://followerboosthqbot.onrender.com/health
+run: curl -fsS --retry 3 --retry-delay 5 https://followerboosthqbot.onrender.com/health
